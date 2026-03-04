@@ -2,6 +2,8 @@ import { useNavigate } from "react-router-dom";
 import LiveOddsCard from "../components/LiveOddsCard";
 import { useState } from "react";
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+
 export default function Live() {
   const navigate = useNavigate();
   const user = JSON.parse(localStorage.getItem("user") || "{}");
@@ -18,7 +20,7 @@ export default function Live() {
   const createMeeting = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/meeting/create", {
+      const response = await fetch(`${API_BASE_URL}/api/meeting/create`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

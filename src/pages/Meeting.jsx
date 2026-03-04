@@ -3,7 +3,8 @@ import { useParams, useNavigate } from "react-router-dom";
 import io from "socket.io-client";
 import Peer from "peerjs";
 
-const socket = io("http://localhost:5000");
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const socket = io(API_BASE_URL);
 
 export default function Meeting() {
   const { roomId } = useParams();
@@ -127,7 +128,7 @@ export default function Meeting() {
     let uid = null;
     
     try {
-      const response = await fetch(`http://localhost:5000/api/meeting/${roomId}`);
+      const response = await fetch(`${API_BASE_URL}/api/meeting/${roomId}`);
       const meetingData = await response.json();
       
       console.log('Meeting data:', meetingData);
@@ -172,7 +173,7 @@ export default function Meeting() {
 
   const fetchMeetingInfo = async () => {
     try {
-      const response = await fetch(`http://localhost:5000/api/meeting/${roomId}`);
+      const response = await fetch(`${API_BASE_URL}/api/meeting/${roomId}`);
       const data = await response.json();
       setMeetingInfo(data);
     } catch (error) {
@@ -205,7 +206,7 @@ export default function Meeting() {
 
       // Initialize PeerJS
       const peer = new Peer(undefined, {
-        host: 'localhost',
+        host: API_BASE_URL.replace('http://', '').replace('https://', ''),
         port: 5000,
         path: '/peerjs',
         secure: false,
