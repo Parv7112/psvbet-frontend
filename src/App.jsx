@@ -15,13 +15,12 @@ function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
-        <Route path="/live" element={
+        <Route path="/" element={
           <ProtectedRoute>
             <Live />
           </ProtectedRoute>
         } />
         <Route path="/meeting/:roomId" element={<Meeting />} />
-        <Route path="/" element={<Navigate to="/live" />} />
       </Routes>
     </BrowserRouter>
   );
