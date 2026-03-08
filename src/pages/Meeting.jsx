@@ -1,18 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { useParams, useNavigate } from "react-router-dom";
-import SimplePeer from "simple-peer";
+import Peer from "peerjs";
 import socket from "../socket";
-import { SOCKET_DEBUG } from "../socket";
 
-const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-const API_BASE_URL = (() => {
-  try {
-    return new URL(RAW_API_BASE_URL).origin;
-  } catch {
-    return RAW_API_BASE_URL;
-  }
-})();
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
 
 export default function Meeting() {
   const { roomId } = useParams();
@@ -51,15 +43,10 @@ export default function Meeting() {
   const [socketConnected, setSocketConnected] = useState(socket.connected);
   const [peerConnected, setPeerConnected] = useState(false);
   const [webrtcIssue, setWebrtcIssue] = useState("");
-  const [socketId, setSocketId] = useState(socket.id || "");
-  const [peerId, setPeerId] = useState("");
-  const [socketError, setSocketError] = useState("");
-  const [joinAck, setJoinAck] = useState(null);
   
   const localVideoRef = useRef();
-  const peersRef = useRef(new Map()); // remoteId -> SimplePeer
-  const remoteUsersRef = useRef(new Map()); // remoteId -> { userName, isHost }
-  const iceServersRef = useRef([]);
+  const peerInstance = useRef(null);
+  const activeCalls = useRef(new Set());
   const isInitialized = useRef(false);
   const audioContext = useRef(null);
   const localAnalyser = useRef(null);
@@ -96,14 +83,14 @@ export default function Meeting() {
       console.log("Cleaning up...");
       isInitialized.current = false;
       hasJoinedMeeting.current = false;
-      for (const p of peersRef.current.values()) {
-        try { p.destroy(); } catch {}
-      }
-      peersRef.current.clear();
-      remoteUsersRef.current.clear();
+      activeCalls.current.clear();
       
       if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
+      }
+      if (peerInstance.current) {
+        peerInstance.current.destroy();
+        peerInstance.current = null;
       }
       if (audioContext.current) {
         audioContext.current.close();
@@ -122,59 +109,18 @@ export default function Meeting() {
       socket.off("private-call-request");
       socket.off("private-call-ended");
       socket.off("odds-update");
-      socket.off("signal");
-      socket.off("join-state");
-      socket.off("hello");
     };
   }, [roomId]);
 
   useEffect(() => {
     const onConnect = () => setSocketConnected(true);
-    const onDisconnect = (reason) => {
-      setSocketConnected(false);
-      if (reason) setSocketError(String(reason));
-    };
-    const onConnectAny = () => setSocketId(socket.id || "");
-    const onConnectError = (err) => {
-      const msg =
-        err?.message ||
-        err?.description ||
-        err?.toString?.() ||
-        "connect_error";
-      setSocketError(String(msg));
-      setSocketConnected(false);
-    };
-    const onError = (err) => {
-      const msg = err?.message || err?.toString?.() || "socket_error";
-      setSocketError(String(msg));
-    };
+    const onDisconnect = () => setSocketConnected(false);
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
-    socket.on("connect", onConnectAny);
-    socket.on("connect_error", onConnectError);
-    socket.on("error", onError);
-
-    // sync immediately in case socket connected before listeners attached
-    setSocketConnected(socket.connected);
-    setSocketId(socket.id || "");
-
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
-      socket.off("connect", onConnectAny);
-      socket.off("connect_error", onConnectError);
-      socket.off("error", onError);
     };
-  }, []);
-
-  useEffect(() => {
-    const onHello = ({ id }) => {
-      setPeerConnected(true);
-      setPeerId(id || "");
-      setSocketId(id || "");
-    };
-    socket.on("hello", onHello);
-    return () => socket.off("hello", onHello);
   }, []);
 
   const getAuthToken = () => localStorage.getItem("token");
@@ -257,8 +203,9 @@ export default function Meeting() {
     
     // Notify the participant
     socket.emit("start-private-call", { 
-      roomId,
-      targetId: targetPeerId,
+      roomId, 
+      targetPeerId,
+      fromPeerId: peerInstance.current.id,
       fromUserName: userName
     });
   };
@@ -269,7 +216,7 @@ export default function Meeting() {
     
     socket.emit("end-private-call", { 
       roomId,
-      targetId: privateCallActive
+      targetPeerId: privateCallActive
     });
   };
 
@@ -467,6 +414,12 @@ export default function Meeting() {
       // Set up audio level detection for local stream
       setupAudioDetection(stream, setIsSpeaking);
 
+      // Initialize PeerJS
+      const apiUrl = new URL(API_BASE_URL);
+      const isSecure = apiUrl.protocol === 'https:';
+      const peerHost = apiUrl.hostname;
+      const peerPort = apiUrl.port || (isSecure ? 443 : 80);
+
       // Fetch ICE servers from backend (enables TURN in production)
       let iceServers = [
         { urls: "stun:stun.l.google.com:19302" },
@@ -483,134 +436,168 @@ export default function Meeting() {
       } catch {
         // ignore, fallback to default STUN
       }
+      
+      const peer = new Peer(undefined, {
+        host: peerHost,
+        port: peerPort,
+        path: '/peerjs',
+        secure: isSecure,
+        config: {
+          iceServers
+        }
+      });
 
-      iceServersRef.current = iceServers;
+      peerInstance.current = peer;
 
-      // Prevent duplicate join-meeting events
-      if (hasJoinedMeeting.current) return;
-      hasJoinedMeeting.current = true;
-
-      socket.emit(
-        "join-meeting",
-        {
-          roomId,
-          userName: name,
-          userId: uid
-        },
-        (ack) => setJoinAck(ack || { ok: false, message: "no_ack" })
-      );
-
-      const createPeer = (remoteId, initiator) => {
-        if (!remoteId || peersRef.current.has(remoteId)) return;
-        const remoteMeta = remoteUsersRef.current.get(remoteId) || {};
-
-        const p = new SimplePeer({
-          initiator,
-          trickle: true,
-          stream,
-          config: { iceServers: iceServersRef.current }
+      peer.on('open', (id) => {
+        console.log('My peer ID is:', id, 'isHost:', userIsHost);
+        setPeerConnected(true);
+        
+        // Prevent duplicate join-meeting events
+        if (hasJoinedMeeting.current) {
+          console.log('Already joined meeting, skipping duplicate join');
+          return;
+        }
+        
+        hasJoinedMeeting.current = true;
+        
+        // Clear any existing active calls
+        activeCalls.current.clear();
+        
+        socket.emit("join-meeting", { 
+          roomId, 
+          userName: name, 
+          peerId: id,
+          userId: uid 
         });
+      });
 
-        peersRef.current.set(remoteId, p);
+      peer.on('error', (err) => {
+        console.error('PeerJS error:', err);
+        setPeerConnected(false);
+        setWebrtcIssue(err?.message || err?.type || "PeerJS error");
+        if (err.type === 'unavailable-id') {
+          // Peer ID already taken, destroy and retry
+          peer.destroy();
+          isInitialized.current = false;
+        } else if (err.type === 'peer-unavailable') {
+          // Peer doesn't exist anymore, remove from active calls
+          const peerId = err.message.match(/peer (.+)/)?.[1];
+          if (peerId) {
+            console.log('Peer unavailable, removing:', peerId);
+            activeCalls.current.delete(peerId);
+            setRemoteStreams(prev => {
+              const updated = { ...prev };
+              delete updated[peerId];
+              return updated;
+            });
+          }
+        }
+      });
 
-        p.on("signal", (data) => {
-          socket.emit("signal", { to: remoteId, data });
+      // Answer incoming calls
+      peer.on('call', (call) => {
+        console.log('Receiving call from:', call.peer, 'metadata:', call.metadata);
+        call.on('error', (err) => {
+          setWebrtcIssue(err?.message || "Call error");
         });
-
-        p.on("stream", (remoteStream) => {
+        call.on('close', () => {
+          // keep last issue, but don't spam
+        });
+        call.on('iceStateChanged', () => {});
+        call.answer(stream, { metadata: { userName: name, isHost: userIsHost } });
+        
+        call.on('stream', (remoteStream) => {
+          console.log('Received remote stream from:', call.peer);
+          const metadata = call.metadata || {};
           setRemoteStreams(prev => ({
             ...prev,
-            [remoteId]: {
-              stream: remoteStream,
-              userName: remoteMeta.userName || "Participant",
-              isHost: !!remoteMeta.isHost
+            [call.peer]: { 
+              stream: remoteStream, 
+              userName: metadata.userName || 'Participant', 
+              isHost: metadata.isHost || false 
             }
           }));
         });
+      });
 
-        p.on("close", () => {
-          peersRef.current.delete(remoteId);
-          remoteUsersRef.current.delete(remoteId);
+      // Remove old listeners before adding new ones
+      socket.off("user-joined");
+      socket.off("user-left");
+
+      // Listen for new users
+      socket.on("user-joined", (data) => {
+        console.log('User joined:', data);
+        const { peerId, userName: remoteUserName, isHost: remoteIsHost } = data;
+        
+        // Prevent duplicate calls to the same peer
+        if (activeCalls.current.has(peerId)) {
+          console.log('Already have active call with:', peerId);
+          return;
+        }
+        
+        activeCalls.current.add(peerId);
+        
+        // Call the new user with metadata
+        const call = peer.call(peerId, stream, { 
+          metadata: { userName: name, isHost: userIsHost } 
+        });
+        
+        if (!call) {
+          console.error('Failed to create call to:', peerId);
+          activeCalls.current.delete(peerId);
+          return;
+        }
+        
+        call.on('stream', (remoteStream) => {
+          console.log('Received stream from:', peerId, remoteIsHost ? '(HOST)' : '(PARTICIPANT)');
+          setRemoteStreams(prev => ({
+            ...prev,
+            [peerId]: { stream: remoteStream, userName: remoteUserName, isHost: remoteIsHost }
+          }));
+        });
+        
+        call.on('error', (err) => {
+          console.error('Call error with peer:', peerId, err);
+          setWebrtcIssue(err?.message || "Call error");
+          activeCalls.current.delete(peerId);
           setRemoteStreams(prev => {
             const updated = { ...prev };
-            delete updated[remoteId];
+            delete updated[peerId];
             return updated;
           });
         });
-
-        p.on("error", (err) => {
-          setWebrtcIssue(err?.message || "WebRTC peer error");
-          try { p.destroy(); } catch {}
-        });
-      };
-
-      // Clear old listeners then attach WS listeners
-      socket.off("user-joined");
-      socket.off("user-left");
-      socket.off("signal");
-      socket.off("join-state");
-      socket.off("private-call-request");
-      socket.off("private-call-ended");
-
-      socket.on("join-state", (msg) => {
-        // host receives list of current participants
-        const users = msg?.users || [];
-        users.forEach((u) => {
-          if (!u?.id) return;
-          remoteUsersRef.current.set(u.id, { userName: u.userName, isHost: u.isHost });
-          if (userIsHost && !u.isHost) {
-            createPeer(u.id, true);
-          }
+        
+        call.on('close', () => {
+          console.log('Call closed with:', peerId);
+          activeCalls.current.delete(peerId);
         });
       });
 
-      socket.on("user-joined", (msg) => {
-        const remoteId = msg?.id;
-        if (!remoteId) return;
-        remoteUsersRef.current.set(remoteId, { userName: msg.userName, isHost: msg.isHost });
-
-        if (userIsHost && !msg.isHost) {
-          createPeer(remoteId, true);
-        }
-      });
-
-      socket.on("signal", (msg) => {
-        const from = msg?.from;
-        const data = msg?.data;
-        if (!from || !data) return;
-        if (!peersRef.current.has(from)) {
-          // participant creates responder, host creates responder if needed
-          createPeer(from, false);
-        }
-        const p = peersRef.current.get(from);
-        try {
-          p?.signal(data);
-        } catch (err) {
-          setWebrtcIssue(err?.message || "signal failed");
-        }
-      });
-
-      socket.on("user-left", (msg) => {
-        const remoteId = msg?.id || msg;
-        if (!remoteId) return;
-        const p = peersRef.current.get(remoteId);
-        try { p?.destroy(); } catch {}
-        peersRef.current.delete(remoteId);
-        remoteUsersRef.current.delete(remoteId);
+      socket.on("user-left", (peerId) => {
+        console.log("User left:", peerId);
+        activeCalls.current.delete(peerId);
         setRemoteStreams(prev => {
           const updated = { ...prev };
-          delete updated[remoteId];
+          delete updated[peerId];
           return updated;
         });
-
-        if (privateCallActive === remoteId) endPrivateCall();
+        
+        // End private call if active with this user
+        if (privateCallActive === peerId) {
+          endPrivateCall();
+        }
       });
 
-      socket.on("private-call-request", (msg) => {
-        setPrivateCallActive(msg?.fromId || null);
+      // Listen for private call requests
+      socket.on("private-call-request", (data) => {
+        const { fromPeerId, fromUserName } = data;
+        console.log('Private call request from:', fromUserName);
+        setPrivateCallActive(fromPeerId);
       });
 
       socket.on("private-call-ended", () => {
+        console.log('Private call ended');
         setPrivateCallActive(null);
       });
 
@@ -996,10 +983,9 @@ export default function Meeting() {
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
-    for (const p of peersRef.current.values()) {
-      try { p.destroy(); } catch {}
+    if (peerInstance.current) {
+      peerInstance.current.destroy();
     }
-    peersRef.current.clear();
     socket.emit("leave-meeting", { roomId });
     sessionStorage.removeItem("clientAuth");
     const token = localStorage.getItem("token");
@@ -1136,21 +1122,6 @@ export default function Meeting() {
       }}>
         <span>Socket: <b style={{ color: socketConnected ? "#27ae60" : "#e74c3c" }}>{socketConnected ? "OK" : "DOWN"}</b></span>
         <span>Peer: <b style={{ color: peerConnected ? "#27ae60" : "#e74c3c" }}>{peerConnected ? "OK" : "DOWN"}</b></span>
-        <span style={{ opacity: 0.9 }}>sid: <span style={{ fontFamily: "monospace" }}>{socketId || "-"}</span></span>
-        <span style={{ opacity: 0.9 }}>pid: <span style={{ fontFamily: "monospace" }}>{peerId || "-"}</span></span>
-        {!!socketError && (
-          <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            sock_err: {socketError}
-          </span>
-        )}
-        <span style={{ opacity: 0.75, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          sock_url: {SOCKET_DEBUG?.origin}{SOCKET_DEBUG?.path}
-        </span>
-        {joinAck && (
-          <span style={{ opacity: 0.75, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            join: {joinAck.ok ? "OK" : "FAIL"}
-          </span>
-        )}
         {!!webrtcIssue && (
           <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {webrtcIssue}
