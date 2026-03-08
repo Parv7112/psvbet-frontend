@@ -43,6 +43,8 @@ export default function Meeting() {
   const [socketConnected, setSocketConnected] = useState(socket.connected);
   const [peerConnected, setPeerConnected] = useState(false);
   const [webrtcIssue, setWebrtcIssue] = useState("");
+  const [socketId, setSocketId] = useState(socket.id || "");
+  const [peerId, setPeerId] = useState("");
   
   const localVideoRef = useRef();
   const peerInstance = useRef(null);
@@ -115,11 +117,14 @@ export default function Meeting() {
   useEffect(() => {
     const onConnect = () => setSocketConnected(true);
     const onDisconnect = () => setSocketConnected(false);
+    const onConnectAny = () => setSocketId(socket.id || "");
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
+    socket.on("connect", onConnectAny);
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
+      socket.off("connect", onConnectAny);
     };
   }, []);
 
@@ -452,6 +457,7 @@ export default function Meeting() {
       peer.on('open', (id) => {
         console.log('My peer ID is:', id, 'isHost:', userIsHost);
         setPeerConnected(true);
+        setPeerId(id);
         
         // Prevent duplicate join-meeting events
         if (hasJoinedMeeting.current) {
@@ -504,7 +510,35 @@ export default function Meeting() {
         call.on('close', () => {
           // keep last issue, but don't spam
         });
-        call.on('iceStateChanged', () => {});
+
+        // Best-effort ICE diagnostics + retry (usually indicates missing TURN)
+        try {
+          const pc = call.peerConnection;
+          if (pc) {
+            const onIce = () => {
+              const s = pc.iceConnectionState;
+              if (s === "failed" || s === "disconnected") {
+                setWebrtcIssue(`ICE ${s} (likely needs TURN)`);
+                try { call.close(); } catch {}
+                activeCalls.current.delete(call.peer);
+                setTimeout(() => {
+                  if (!peerInstance.current || !localStream) return;
+                  if (activeCalls.current.has(call.peer)) return;
+                  activeCalls.current.add(call.peer);
+                  const retry = peerInstance.current.call(call.peer, localStream, { metadata: { userName, isHost } });
+                  retry?.on?.("error", (err) => setWebrtcIssue(err?.message || "Retry call error"));
+                }, 1500);
+              }
+            };
+            pc.addEventListener("iceconnectionstatechange", onIce);
+            call.on("close", () => {
+              try { pc.removeEventListener("iceconnectionstatechange", onIce); } catch {}
+            });
+          }
+        } catch {
+          // ignore
+        }
+
         call.answer(stream, { metadata: { userName: name, isHost: userIsHost } });
         
         call.on('stream', (remoteStream) => {
@@ -1122,6 +1156,8 @@ export default function Meeting() {
       }}>
         <span>Socket: <b style={{ color: socketConnected ? "#27ae60" : "#e74c3c" }}>{socketConnected ? "OK" : "DOWN"}</b></span>
         <span>Peer: <b style={{ color: peerConnected ? "#27ae60" : "#e74c3c" }}>{peerConnected ? "OK" : "DOWN"}</b></span>
+        <span style={{ opacity: 0.9 }}>sid: <span style={{ fontFamily: "monospace" }}>{socketId || "-"}</span></span>
+        <span style={{ opacity: 0.9 }}>pid: <span style={{ fontFamily: "monospace" }}>{peerId || "-"}</span></span>
         {!!webrtcIssue && (
           <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {webrtcIssue}
