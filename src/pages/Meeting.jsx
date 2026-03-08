@@ -4,7 +4,14 @@ import { useParams, useNavigate } from "react-router-dom";
 import Peer from "peerjs";
 import socket from "../socket";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const API_BASE_URL = (() => {
+  try {
+    return new URL(RAW_API_BASE_URL).origin;
+  } catch {
+    return RAW_API_BASE_URL;
+  }
+})();
 
 export default function Meeting() {
   const { roomId } = useParams();
