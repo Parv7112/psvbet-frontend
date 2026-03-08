@@ -3,6 +3,7 @@ import Live from "./pages/Live";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Meeting from "./pages/Meeting";
+import MeetingRecordings from "./pages/MeetingRecordings";
 
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem("token");
@@ -21,6 +22,14 @@ function App() {
           </ProtectedRoute>
         } />
         <Route path="/meeting/:roomId" element={<Meeting />} />
+        <Route
+          path="/meeting/:roomId/recordings"
+          element={
+            <ProtectedRoute>
+              <MeetingRecordings />
+            </ProtectedRoute>
+          }
+        />
       </Routes>
     </BrowserRouter>
   );

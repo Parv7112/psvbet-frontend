@@ -880,6 +880,29 @@ export default function Live() {
                           >
                             Join
                           </button>
+                          {meeting.recordings && meeting.recordings.length > 0 && (
+                            <button
+                              onClick={() =>
+                                window.open(
+                                  `/meeting/${meeting.roomId}/recordings`,
+                                  "_blank",
+                                  "noopener,noreferrer"
+                                )
+                              }
+                              style={{
+                                padding: "10px 20px",
+                                background: "#667eea",
+                                color: "white",
+                                border: "none",
+                                borderRadius: 8,
+                                cursor: "pointer",
+                                fontWeight: 500,
+                                fontSize: 14
+                              }}
+                            >
+                              Recordings
+                            </button>
+                          )}
                           <button 
                             onClick={() => {
                               const link = `${window.location.origin}/meeting/${meeting.roomId}`;
@@ -986,6 +1009,29 @@ export default function Live() {
                           >
                             Reopen
                           </button>
+                          {meeting.recordings && meeting.recordings.length > 0 && (
+                            <button
+                              onClick={() =>
+                                window.open(
+                                  `/meeting/${meeting.roomId}/recordings`,
+                                  "_blank",
+                                  "noopener,noreferrer"
+                                )
+                              }
+                              style={{
+                                padding: "10px 20px",
+                                background: "#667eea",
+                                color: "white",
+                                border: "none",
+                                borderRadius: 8,
+                                cursor: "pointer",
+                                fontWeight: 500,
+                                fontSize: 14
+                              }}
+                            >
+                              Recordings
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))}
