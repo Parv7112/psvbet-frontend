@@ -29,7 +29,8 @@ export const SOCKET_DEBUG = {
 // Using polling only to avoid WebSocket frame header errors and connection limits
 export const socket = io(SOCKET_ORIGIN, {
   path: SOCKET_PATH,
-  transports: ['websocket', 'polling'], // Prefer websocket, fallback to polling
+  // Polling can break behind load balancers (no sticky sessions).
+  transports: ['websocket'],
   reconnection: true,
   reconnectionDelay: 1000,
   reconnectionDelayMax: 8000,
