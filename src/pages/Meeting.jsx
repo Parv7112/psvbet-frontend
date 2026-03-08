@@ -54,6 +54,7 @@ export default function Meeting() {
   const [socketId, setSocketId] = useState(socket.id || "");
   const [peerId, setPeerId] = useState("");
   const [socketError, setSocketError] = useState("");
+  const [joinAck, setJoinAck] = useState(null);
   
   const localVideoRef = useRef();
   const peerInstance = useRef(null);
@@ -148,6 +149,11 @@ export default function Meeting() {
     socket.on("connect", onConnectAny);
     socket.on("connect_error", onConnectError);
     socket.on("error", onError);
+
+    // sync immediately in case socket connected before listeners attached
+    setSocketConnected(socket.connected);
+    setSocketId(socket.id || "");
+
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
@@ -499,12 +505,22 @@ export default function Meeting() {
         // Clear any existing active calls
         activeCalls.current.clear();
         
-        socket.emit("join-meeting", { 
-          roomId, 
-          userName: name, 
-          peerId: id,
-          userId: uid 
-        });
+        // Ensure socket is connected before emitting
+        if (!socket.connected) {
+          try { socket.connect(); } catch {}
+        }
+        socket.emit(
+          "join-meeting",
+          {
+            roomId,
+            userName: name,
+            peerId: id,
+            userId: uid
+          },
+          (ack) => {
+            setJoinAck(ack || { ok: false, error: "no_ack" });
+          }
+        );
       });
 
       peer.on('error', (err) => {
@@ -1195,6 +1211,11 @@ export default function Meeting() {
         <span style={{ opacity: 0.75, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           sock_url: {SOCKET_DEBUG?.origin}{SOCKET_DEBUG?.path}
         </span>
+        {joinAck && (
+          <span style={{ opacity: 0.75, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            join: {joinAck.ok ? "OK" : "FAIL"}
+          </span>
+        )}
         {!!webrtcIssue && (
           <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {webrtcIssue}
