@@ -40,6 +40,9 @@ export default function Meeting() {
   const [showRecordings, setShowRecordings] = useState(false);
   const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(socket.connected);
+  const [peerConnected, setPeerConnected] = useState(false);
+  const [webrtcIssue, setWebrtcIssue] = useState("");
   
   const localVideoRef = useRef();
   const peerInstance = useRef(null);
@@ -108,6 +111,17 @@ export default function Meeting() {
       socket.off("odds-update");
     };
   }, [roomId]);
+
+  useEffect(() => {
+    const onConnect = () => setSocketConnected(true);
+    const onDisconnect = () => setSocketConnected(false);
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+    };
+  }, []);
 
   const getAuthToken = () => localStorage.getItem("token");
 
@@ -303,6 +317,39 @@ export default function Meeting() {
     return status === "finished";
   };
 
+  const getBattingTeamName = (score) => {
+    if (!score) return null;
+    if (isMatchEnded(score)) return null;
+    const homeTeam = score.event_home_team;
+    const awayTeam = score.event_away_team;
+    const homeScore = String(score.event_home_final_result || "").trim();
+    const awayScore = String(score.event_away_final_result || "").trim();
+
+    // Most reliable signal for live innings in this API:
+    // one side has a live score, the other is empty.
+    if (homeScore && !awayScore) return homeTeam || null;
+    if (awayScore && !homeScore) return awayTeam || null;
+
+    // Fallback only when both/none are present.
+    const info = String(score.event_status_info || "").toLowerCase();
+    if (homeTeam && info.includes(String(homeTeam).toLowerCase())) return homeTeam;
+    if (awayTeam && info.includes(String(awayTeam).toLowerCase())) return awayTeam;
+    return homeTeam || awayTeam || null;
+  };
+
+  const getBattingScore = (score) => {
+    if (!score) return "0/0";
+    const homeTeam = score.event_home_team;
+    const awayTeam = score.event_away_team;
+    const battingTeam = getBattingTeamName(score);
+    const homeScore = String(score.event_home_final_result || "").trim();
+    const awayScore = String(score.event_away_final_result || "").trim();
+
+    if (battingTeam && battingTeam === homeTeam) return homeScore || awayScore || "0/0";
+    if (battingTeam && battingTeam === awayTeam) return awayScore || homeScore || "0/0";
+    return homeScore || awayScore || "0/0";
+  };
+
   const fetchLiveScore = async (matchId) => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/cricket/match/${matchId}`);
@@ -404,6 +451,7 @@ export default function Meeting() {
 
       peer.on('open', (id) => {
         console.log('My peer ID is:', id, 'isHost:', userIsHost);
+        setPeerConnected(true);
         
         // Prevent duplicate join-meeting events
         if (hasJoinedMeeting.current) {
@@ -426,6 +474,8 @@ export default function Meeting() {
 
       peer.on('error', (err) => {
         console.error('PeerJS error:', err);
+        setPeerConnected(false);
+        setWebrtcIssue(err?.message || err?.type || "PeerJS error");
         if (err.type === 'unavailable-id') {
           // Peer ID already taken, destroy and retry
           peer.destroy();
@@ -448,6 +498,13 @@ export default function Meeting() {
       // Answer incoming calls
       peer.on('call', (call) => {
         console.log('Receiving call from:', call.peer, 'metadata:', call.metadata);
+        call.on('error', (err) => {
+          setWebrtcIssue(err?.message || "Call error");
+        });
+        call.on('close', () => {
+          // keep last issue, but don't spam
+        });
+        call.on('iceStateChanged', () => {});
         call.answer(stream, { metadata: { userName: name, isHost: userIsHost } });
         
         call.on('stream', (remoteStream) => {
@@ -502,6 +559,7 @@ export default function Meeting() {
         
         call.on('error', (err) => {
           console.error('Call error with peer:', peerId, err);
+          setWebrtcIssue(err?.message || "Call error");
           activeCalls.current.delete(peerId);
           setRemoteStreams(prev => {
             const updated = { ...prev };
@@ -547,6 +605,7 @@ export default function Meeting() {
       console.error("Failed to get media:", error);
       alert("Please allow camera and microphone access");
       isInitialized.current = false; // Reset on error
+      setWebrtcIssue(error?.message || "getUserMedia failed");
     }
   };
 
@@ -1044,6 +1103,31 @@ export default function Meeting() {
       display: "flex",
       flexDirection: "column"
     }}>
+      <div style={{
+        position: "fixed",
+        top: 70,
+        left: 20,
+        zIndex: 1500,
+        padding: "8px 10px",
+        background: "rgba(0,0,0,0.35)",
+        border: "1px solid rgba(255,255,255,0.2)",
+        borderRadius: 12,
+        color: "white",
+        fontSize: 12,
+        backdropFilter: "blur(8px)",
+        display: "flex",
+        gap: 10,
+        alignItems: "center",
+        maxWidth: "calc(100vw - 40px)"
+      }}>
+        <span>Socket: <b style={{ color: socketConnected ? "#27ae60" : "#e74c3c" }}>{socketConnected ? "OK" : "DOWN"}</b></span>
+        <span>Peer: <b style={{ color: peerConnected ? "#27ae60" : "#e74c3c" }}>{peerConnected ? "OK" : "DOWN"}</b></span>
+        {!!webrtcIssue && (
+          <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {webrtcIssue}
+          </span>
+        )}
+      </div>
       {(audioPlaybackBlocked || !audioUnlocked) && (
         <div style={{
           position: "fixed",
@@ -1208,21 +1292,7 @@ export default function Meeting() {
                   <div style={{ fontSize: 11, opacity: 0.85 }}>
                     Batting: <span style={{ fontWeight: 700, fontSize: 13 }}>
                       {(() => {
-                        const status = liveScore.event_status_info?.toLowerCase() || '';
-                        const homeTeam = liveScore.event_home_team;
-                        const awayTeam = liveScore.event_away_team;
-                        
-                        if (status.includes(homeTeam.toLowerCase())) {
-                          return homeTeam;
-                        } else if (status.includes(awayTeam.toLowerCase())) {
-                          return awayTeam;
-                        }
-                        
-                        if (liveScore.event_home_final_result && liveScore.event_away_final_result) {
-                          return awayTeam;
-                        }
-                        
-                        return liveScore.event_home_final_result ? homeTeam : awayTeam;
+                        return getBattingTeamName(liveScore) || "—";
                       })()}
                     </span>
                   </div>
@@ -1361,21 +1431,7 @@ export default function Meeting() {
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontSize: 40, fontWeight: 700, lineHeight: 1, letterSpacing: "-2px" }}>
                   {(() => {
-                    const status = liveScore.event_status_info?.toLowerCase() || '';
-                    const homeTeam = liveScore.event_home_team;
-                    const awayTeam = liveScore.event_away_team;
-                    
-                    if (status.includes(homeTeam.toLowerCase())) {
-                      return liveScore.event_home_final_result || '0/0';
-                    } else if (status.includes(awayTeam.toLowerCase())) {
-                      return liveScore.event_away_final_result || '0/0';
-                    }
-                    
-                    if (liveScore.event_home_final_result && liveScore.event_away_final_result) {
-                      return liveScore.event_away_final_result;
-                    }
-                    
-                    return liveScore.event_home_final_result || liveScore.event_away_final_result || '0/0';
+                    return getBattingScore(liveScore);
                   })()}
                 </div>
                 {liveScore.event_status_info && (
@@ -1443,28 +1499,13 @@ export default function Meeting() {
                     
                     // Get BOTH batting batsmen from scorecard
                     if (liveScore.scorecard) {
-                      // Determine which team is batting
-                      const status = liveScore.event_status_info?.toLowerCase() || '';
-                      const homeTeam = liveScore.event_home_team;
-                      const awayTeam = liveScore.event_away_team;
-                      
-                      let battingTeam = null;
-                      if (status.includes(homeTeam.toLowerCase())) {
-                        battingTeam = `${homeTeam} 1 INN`;
-                      } else if (status.includes(awayTeam.toLowerCase())) {
-                        battingTeam = `${awayTeam} 1 INN`;
-                      } else if (liveScore.event_home_final_result && liveScore.event_away_final_result) {
-                        // Second innings
-                        battingTeam = `${awayTeam} 1 INN`;
-                      } else if (liveScore.event_home_final_result) {
-                        // First innings complete, second innings started
-                        battingTeam = `${awayTeam} 1 INN`;
-                      } else {
-                        // First innings
-                        battingTeam = `${homeTeam} 1 INN`;
-                      }
-                      
-                      const teamScorecard = liveScore.scorecard[battingTeam];
+                  const battingTeamName = getBattingTeamName(liveScore);
+                  const scorecardKeys = Object.keys(liveScore.scorecard);
+                  const battingKey =
+                    (battingTeamName && scorecardKeys.find(k => k.toLowerCase().includes(String(battingTeamName).toLowerCase()))) ||
+                    scorecardKeys[0];
+
+                  const teamScorecard = battingKey ? liveScore.scorecard[battingKey] : null;
                       if (teamScorecard) {
                         // Find ALL not out batsmen
                         const notOutBatsmen = teamScorecard.filter(p => 
@@ -1481,11 +1522,15 @@ export default function Meeting() {
                       
                       // Get bowler stats from scorecard
                       if (bowler) {
-                        const bowlingTeam = battingTeam === `${homeTeam} 1 INN` 
-                          ? `${awayTeam} 1 INN` 
-                          : `${homeTeam} 1 INN`;
-                        
-                        const teamScorecard = liveScore.scorecard[bowlingTeam];
+                    const homeTeam = liveScore.event_home_team;
+                    const awayTeam = liveScore.event_away_team;
+                    const bowlingTeamName =
+                      battingTeamName === homeTeam ? awayTeam : homeTeam;
+                    const bowlingKey =
+                      (bowlingTeamName && scorecardKeys.find(k => k.toLowerCase().includes(String(bowlingTeamName).toLowerCase()))) ||
+                      scorecardKeys.find(k => k !== battingKey);
+
+                    const teamScorecard = bowlingKey ? liveScore.scorecard[bowlingKey] : null;
                         if (teamScorecard) {
                           const bowlerData = teamScorecard.find(p => 
                             p.type === 'Bowler' && p.player && bowler.name && 
