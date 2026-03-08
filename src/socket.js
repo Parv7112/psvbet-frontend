@@ -8,7 +8,10 @@ export const socket = io(API_BASE_URL, {
   transports: ['websocket', 'polling'], // Prefer websocket, fallback to polling
   reconnection: true,
   reconnectionDelay: 1000,
-  reconnectionAttempts: 5,
+  reconnectionDelayMax: 8000,
+  reconnectionAttempts: Infinity,
+  timeout: 20000,
+  withCredentials: true,
   autoConnect: true,
   forceNew: false
 });

@@ -45,6 +45,7 @@ export default function Meeting() {
   const [webrtcIssue, setWebrtcIssue] = useState("");
   const [socketId, setSocketId] = useState(socket.id || "");
   const [peerId, setPeerId] = useState("");
+  const [socketError, setSocketError] = useState("");
   
   const localVideoRef = useRef();
   const peerInstance = useRef(null);
@@ -116,15 +117,35 @@ export default function Meeting() {
 
   useEffect(() => {
     const onConnect = () => setSocketConnected(true);
-    const onDisconnect = () => setSocketConnected(false);
+    const onDisconnect = (reason) => {
+      setSocketConnected(false);
+      if (reason) setSocketError(String(reason));
+    };
     const onConnectAny = () => setSocketId(socket.id || "");
+    const onConnectError = (err) => {
+      const msg =
+        err?.message ||
+        err?.description ||
+        err?.toString?.() ||
+        "connect_error";
+      setSocketError(String(msg));
+      setSocketConnected(false);
+    };
+    const onError = (err) => {
+      const msg = err?.message || err?.toString?.() || "socket_error";
+      setSocketError(String(msg));
+    };
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.on("connect", onConnectAny);
+    socket.on("connect_error", onConnectError);
+    socket.on("error", onError);
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
       socket.off("connect", onConnectAny);
+      socket.off("connect_error", onConnectError);
+      socket.off("error", onError);
     };
   }, []);
 
@@ -1158,6 +1179,11 @@ export default function Meeting() {
         <span>Peer: <b style={{ color: peerConnected ? "#27ae60" : "#e74c3c" }}>{peerConnected ? "OK" : "DOWN"}</b></span>
         <span style={{ opacity: 0.9 }}>sid: <span style={{ fontFamily: "monospace" }}>{socketId || "-"}</span></span>
         <span style={{ opacity: 0.9 }}>pid: <span style={{ fontFamily: "monospace" }}>{peerId || "-"}</span></span>
+        {!!socketError && (
+          <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            sock_err: {socketError}
+          </span>
+        )}
         {!!webrtcIssue && (
           <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {webrtcIssue}
