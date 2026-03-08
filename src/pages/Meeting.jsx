@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import { useParams, useNavigate } from "react-router-dom";
 import Peer from "peerjs";
 import socket from "../socket";
+import { SOCKET_DEBUG } from "../socket";
 
 const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
 const API_BASE_URL = (() => {
@@ -1191,6 +1192,9 @@ export default function Meeting() {
             sock_err: {socketError}
           </span>
         )}
+        <span style={{ opacity: 0.75, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          sock_url: {SOCKET_DEBUG?.origin}{SOCKET_DEBUG?.path}
+        </span>
         {!!webrtcIssue && (
           <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {webrtcIssue}
