@@ -46,11 +46,13 @@ export default function Meeting() {
   
   const localVideoRef = useRef();
   const peerInstance = useRef(null);
-  const activeCalls = useRef(new Set());
+  // peerId -> PeerJS MediaConnection (so we can access RTCPeerConnection/sendors)
+  const activeCalls = useRef(new Map());
   const isInitialized = useRef(false);
   const audioContext = useRef(null);
   const localAnalyser = useRef(null);
   const privateAudioStream = useRef(null);
+  const silentAudioTracks = useRef(new Map()); // peerId -> MediaStreamTrack (disabled clone)
   const hasJoinedMeeting = useRef(false);
   const recordingRef = useRef({
     recorder: null,
@@ -84,6 +86,15 @@ export default function Meeting() {
       isInitialized.current = false;
       hasJoinedMeeting.current = false;
       activeCalls.current.clear();
+      // stop any per-peer silent tracks we created
+      for (const track of silentAudioTracks.current.values()) {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      }
+      silentAudioTracks.current.clear();
       
       if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
@@ -194,6 +205,75 @@ export default function Meeting() {
     }
   };
 
+  const getPeerConnectionFromCall = (call) => {
+    if (!call) return null;
+    return (
+      call.peerConnection ||
+      call._pc ||
+      call?.connection?.peerConnection ||
+      call?._negotiator?._pc ||
+      call?._negotiator?.peerConnection ||
+      null
+    );
+  };
+
+  const getAudioSenderFromCall = (call) => {
+    const pc = getPeerConnectionFromCall(call);
+    if (!pc || !pc.getSenders) return null;
+    const senders = pc.getSenders() || [];
+    return senders.find((s) => s?.track?.kind === "audio") || null;
+  };
+
+  const getSilentTrackForPeer = (peerId) => {
+    const existing = silentAudioTracks.current.get(peerId);
+    if (existing) return existing;
+    const mic = localStream?.getAudioTracks?.()[0];
+    if (!mic || !mic.clone) return null;
+    const silent = mic.clone();
+    silent.enabled = false;
+    silentAudioTracks.current.set(peerId, silent);
+    return silent;
+  };
+
+  const applyPrivateOutgoingAudioRouting = useCallback(
+    async (targetPeerId) => {
+      // Only the host has connections to multiple participants in this app.
+      if (!localStream) return;
+      const mic = localStream.getAudioTracks?.()[0] || null;
+
+      for (const [peerId, call] of activeCalls.current.entries()) {
+        const sender = getAudioSenderFromCall(call);
+        if (!sender || !sender.replaceTrack) continue;
+
+        const shouldSendMic = !targetPeerId || peerId === targetPeerId;
+        const desiredTrack = shouldSendMic ? mic : null;
+
+        try {
+          await sender.replaceTrack(desiredTrack);
+        } catch {
+          // Some browsers can be finicky with replaceTrack(null); fall back to a disabled clone.
+          if (!shouldSendMic) {
+            const silent = getSilentTrackForPeer(peerId);
+            if (silent) {
+              try {
+                await sender.replaceTrack(silent);
+              } catch {
+                // ignore
+              }
+            }
+          } else if (mic) {
+            try {
+              await sender.replaceTrack(mic);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    },
+    [localStream]
+  );
+
   const startPrivateCall = async (targetPeerId, targetUserName) => {
     if (!isHost) return;
     
@@ -219,6 +299,12 @@ export default function Meeting() {
       targetPeerId: privateCallActive
     });
   };
+
+  useEffect(() => {
+    // When private mode toggles, adjust which peers receive our mic audio.
+    // (If not host, this is effectively a no-op in current room topology.)
+    applyPrivateOutgoingAudioRouting(privateCallActive);
+  }, [privateCallActive, applyPrivateOutgoingAudioRouting]);
 
   const checkUserAuth = async () => {
     const user = JSON.parse(localStorage.getItem("user") || "{}");
@@ -498,11 +584,14 @@ export default function Meeting() {
       // Answer incoming calls
       peer.on('call', (call) => {
         console.log('Receiving call from:', call.peer, 'metadata:', call.metadata);
+        // Track this call so we can route audio per-peer (private mode)
+        activeCalls.current.set(call.peer, call);
         call.on('error', (err) => {
           setWebrtcIssue(err?.message || "Call error");
         });
         call.on('close', () => {
           // keep last issue, but don't spam
+          activeCalls.current.delete(call.peer);
         });
         call.on('iceStateChanged', () => {});
         call.answer(stream, { metadata: { userName: name, isHost: userIsHost } });
@@ -519,6 +608,11 @@ export default function Meeting() {
             }
           }));
         });
+
+        // Apply current private routing to newly established call
+        if (privateCallActive) {
+          applyPrivateOutgoingAudioRouting(privateCallActive);
+        }
       });
 
       // Remove old listeners before adding new ones
@@ -536,8 +630,6 @@ export default function Meeting() {
           return;
         }
         
-        activeCalls.current.add(peerId);
-        
         // Call the new user with metadata
         const call = peer.call(peerId, stream, { 
           metadata: { userName: name, isHost: userIsHost } 
@@ -545,9 +637,10 @@ export default function Meeting() {
         
         if (!call) {
           console.error('Failed to create call to:', peerId);
-          activeCalls.current.delete(peerId);
           return;
         }
+
+        activeCalls.current.set(peerId, call);
         
         call.on('stream', (remoteStream) => {
           console.log('Received stream from:', peerId, remoteIsHost ? '(HOST)' : '(PARTICIPANT)');
@@ -572,6 +665,11 @@ export default function Meeting() {
           console.log('Call closed with:', peerId);
           activeCalls.current.delete(peerId);
         });
+
+        // Apply current private routing to newly established outgoing call
+        if (privateCallActive) {
+          applyPrivateOutgoingAudioRouting(privateCallActive);
+        }
       });
 
       socket.on("user-left", (peerId) => {
