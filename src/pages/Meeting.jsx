@@ -246,27 +246,20 @@ export default function Meeting() {
         if (!sender || !sender.replaceTrack) continue;
 
         const shouldSendMic = !targetPeerId || peerId === targetPeerId;
-        const desiredTrack = shouldSendMic ? mic : null;
+        // Avoid replaceTrack(null) (can break audio on some browsers/PeerJS combos).
+        // Instead, swap in a disabled "silent" track for non-selected peers.
+        const silent = shouldSendMic ? null : getSilentTrackForPeer(peerId);
+        const desiredTrack = shouldSendMic ? mic : silent;
 
         try {
           await sender.replaceTrack(desiredTrack);
         } catch {
-          // Some browsers can be finicky with replaceTrack(null); fall back to a disabled clone.
-          if (!shouldSendMic) {
-            const silent = getSilentTrackForPeer(peerId);
-            if (silent) {
-              try {
-                await sender.replaceTrack(silent);
-              } catch {
-                // ignore
-              }
-            }
-          } else if (mic) {
-            try {
-              await sender.replaceTrack(mic);
-            } catch {
-              // ignore
-            }
+          // Best-effort retry: if mic failed, try again; if silent missing, do nothing.
+          try {
+            if (shouldSendMic && mic) await sender.replaceTrack(mic);
+            if (!shouldSendMic && silent) await sender.replaceTrack(silent);
+          } catch {
+            // ignore
           }
         }
       }
