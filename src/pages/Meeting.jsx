@@ -29,6 +29,9 @@ export default function Meeting() {
   const [matchData, setMatchData] = useState(null);
   const [liveScore, setLiveScore] = useState(null);
   const [loadingScore, setLoadingScore] = useState(false);
+  const [cricketMatches, setCricketMatches] = useState([]);
+  const [showChangeMatch, setShowChangeMatch] = useState(false);
+  const [changeMatchSearch, setChangeMatchSearch] = useState("");
   const [selectedTeam, setSelectedTeam] = useState("");
   const [teamAOdds, setTeamAOdds] = useState("");
   const [teamBOdds, setTeamBOdds] = useState("");
@@ -446,6 +449,48 @@ export default function Meeting() {
       console.error("Failed to fetch live score:", error);
     }
     return false;
+  };
+
+  const fetchCricketMatches = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/cricket/current-matches`);
+      const data = await response.json();
+      if (data.result) {
+        const transformed = data.result.map(m => ({
+          id: m.event_key,
+          name: `${m.event_home_team} vs ${m.event_away_team}`,
+          league: m.league_name || "",
+          matchType: m.event_type || "",
+          matchStarted: m.event_live === "1" || m.event_status === "Finished",
+          matchEnded: m.event_status === "Finished",
+          dateTimeGMT: `${m.event_date_start}T${m.event_time || "00:00"}:00`
+        }));
+        setCricketMatches(transformed);
+      }
+    } catch (error) {
+      console.error("Failed to fetch cricket matches:", error);
+    }
+  };
+
+  const handleChangeMatch = async (match) => {
+    const newMatchData = { matchId: match.id, matchName: match.name, league: match.league };
+    // Update UI immediately
+    setMatchData(newMatchData);
+    setLiveScore(null);
+    fetchLiveScore(match.id);
+    setShowChangeMatch(false);
+    setChangeMatchSearch("");
+    // Persist to backend (best-effort)
+    try {
+      const token = getAuthToken();
+      await fetch(`${API_BASE_URL}/api/meeting/${roomId}/match`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ selectedMatch: newMatchData })
+      });
+    } catch (error) {
+      console.error("Failed to persist match change:", error);
+    }
   };
 
   useEffect(() => {
@@ -1387,6 +1432,24 @@ export default function Meeting() {
                       })()}
                     </span>
                   </div>
+                  {isHost && (
+                    <button
+                      onClick={() => { setShowChangeMatch(true); fetchCricketMatches(); }}
+                      style={{
+                        marginTop: 8,
+                        padding: "4px 10px",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: "rgba(255,255,255,0.2)",
+                        color: "white",
+                        border: "1px solid rgba(255,255,255,0.4)",
+                        borderRadius: 6,
+                        cursor: "pointer"
+                      }}
+                    >
+                      🔄 Change Match
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -2216,6 +2279,123 @@ export default function Meeting() {
       )}
 
       {isHost && !showRecordings && recordings.length > 0 && (
+        <button
+          onClick={() => setShowRecordings(true)}
+          style={{
+            position: "fixed",
+            right: 20,
+            bottom: 20,
+            background: "rgba(0,0,0,0.55)",
+            border: "1px solid rgba(255,255,255,0.25)",
+            color: "white",
+            borderRadius: 999,
+            padding: "10px 14px",
+            cursor: "pointer",
+            backdropFilter: "blur(10px)",
+            zIndex: 1100
+          }}
+          title="Show recordings"
+        >
+          Recordings ({recordings.length})
+        </button>
+      )}
+
+      {showChangeMatch && (
+        <div
+          onClick={() => { setShowChangeMatch(false); setChangeMatchSearch(""); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+            zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center"
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: "white", borderRadius: 12, padding: 24,
+              width: 480, maxWidth: "90vw", boxShadow: "0 20px 60px rgba(0,0,0,0.3)"
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0, color: "#2c3e50", fontSize: 18 }}>🏏 Change Match</h3>
+              <button
+                onClick={() => { setShowChangeMatch(false); setChangeMatchSearch(""); }}
+                style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#95a5a6" }}
+              >×</button>
+            </div>
+            <input
+              type="text"
+              placeholder="Search matches..."
+              value={changeMatchSearch}
+              onChange={e => setChangeMatchSearch(e.target.value)}
+              autoFocus
+              style={{
+                width: "100%", padding: "10px 12px", border: "2px solid #e0e0e0",
+                borderRadius: 8, fontSize: 14, boxSizing: "border-box", marginBottom: 12
+              }}
+            />
+            <div style={{ maxHeight: 360, overflowY: "auto" }}>
+              {(() => {
+                const filtered = cricketMatches
+                  .filter(m => !m.matchEnded)
+                  .filter(m =>
+                    !changeMatchSearch ||
+                    m.name?.toLowerCase().includes(changeMatchSearch.toLowerCase()) ||
+                    m.league?.toLowerCase().includes(changeMatchSearch.toLowerCase())
+                  );
+                const live = filtered.filter(m => m.matchStarted);
+                const upcoming = filtered.filter(m => !m.matchStarted);
+                if (filtered.length === 0) return (
+                  <div style={{ textAlign: "center", padding: 20, color: "#95a5a6" }}>No matches found</div>
+                );
+                return (
+                  <>
+                    {live.length > 0 && (
+                      <>
+                        <div style={{ padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#667eea", textTransform: "uppercase", background: "#f8f9fa", borderRadius: 6, marginBottom: 6 }}>
+                          🔴 Live ({live.length})
+                        </div>
+                        {live.map(m => (
+                          <div key={m.id} onClick={() => handleChangeMatch(m)} style={{
+                            padding: "10px 12px", borderRadius: 8, cursor: "pointer", marginBottom: 4,
+                            background: matchData?.matchId === m.id ? "#f0f4ff" : "white",
+                            border: "1px solid #f0f0f0"
+                          }}
+                            onMouseOver={e => e.currentTarget.style.background = "#f8f9fa"}
+                            onMouseOut={e => e.currentTarget.style.background = matchData?.matchId === m.id ? "#f0f4ff" : "white"}
+                          >
+                            <div style={{ fontWeight: 600, fontSize: 13, color: "#2c3e50" }}>{m.name}</div>
+                            <div style={{ fontSize: 11, color: "#667eea", marginTop: 2 }}>{m.league}</div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    {upcoming.length > 0 && (
+                      <>
+                        <div style={{ padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#667eea", textTransform: "uppercase", background: "#f8f9fa", borderRadius: 6, margin: "10px 0 6px" }}>
+                          📅 Upcoming ({upcoming.length})
+                        </div>
+                        {upcoming.map(m => (
+                          <div key={m.id} onClick={() => handleChangeMatch(m)} style={{
+                            padding: "10px 12px", borderRadius: 8, cursor: "pointer", marginBottom: 4,
+                            background: matchData?.matchId === m.id ? "#f0f4ff" : "white",
+                            border: "1px solid #f0f0f0"
+                          }}
+                            onMouseOver={e => e.currentTarget.style.background = "#f8f9fa"}
+                            onMouseOut={e => e.currentTarget.style.background = matchData?.matchId === m.id ? "#f0f4ff" : "white"}
+                          >
+                            <div style={{ fontWeight: 600, fontSize: 13, color: "#2c3e50" }}>{m.name}</div>
+                            <div style={{ fontSize: 11, color: "#667eea", marginTop: 2 }}>{m.league}</div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
         <button
           onClick={() => setShowRecordings(true)}
           style={{

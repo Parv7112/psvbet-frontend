@@ -764,8 +764,11 @@ export default function Live() {
                 display: "flex", 
                 gap: 10, 
                 marginBottom: 30,
-                borderBottom: "2px solid #e0e0e0"
+                borderBottom: "2px solid #e0e0e0",
+                alignItems: "center",
+                justifyContent: "space-between"
               }}>
+                <div style={{ display: "flex", gap: 10 }}>
                 <button
                   onClick={() => setMeetingsTab("active")}
                   style={{
@@ -797,6 +800,23 @@ export default function Live() {
                   }}
                 >
                   Closed Meetings ({closedMeetings.length})
+                </button>
+                </div>
+                <button
+                  onClick={() => setShowCreateMeeting(true)}
+                  style={{
+                    padding: "10px 20px",
+                    background: "#667eea",
+                    color: "white",
+                    border: "none",
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    fontSize: 14,
+                    fontWeight: 600,
+                    marginBottom: 2
+                  }}
+                >
+                  ➕ Create Meeting
                 </button>
               </div>
 
