@@ -4,10 +4,17 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Meeting from "./pages/Meeting";
 import MeetingRecordings from "./pages/MeetingRecordings";
+import ClientLogin from "./pages/ClientLogin";
+import ClientPortal from "./pages/ClientPortal";
 
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem("token");
   return token ? children : <Navigate to="/login" />;
+}
+
+function ClientProtectedRoute({ children }) {
+  const token = localStorage.getItem("clientToken");
+  return token ? children : <Navigate to="/client/login" />;
 }
 
 function App() {
@@ -16,6 +23,15 @@ function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/client/login" element={<ClientLogin />} />
+        <Route
+          path="/client"
+          element={
+            <ClientProtectedRoute>
+              <ClientPortal />
+            </ClientProtectedRoute>
+          }
+        />
         <Route path="/" element={
           <ProtectedRoute>
             <Live />
