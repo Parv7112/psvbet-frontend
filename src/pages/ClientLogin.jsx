@@ -6,6 +6,21 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000
 const fontUi =
   'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 
+function persistClientSession(data) {
+  localStorage.setItem("clientToken", data.token);
+  localStorage.setItem(
+    "clientUser",
+    JSON.stringify({
+      ...data.client,
+      adminName: data.adminName || ""
+    })
+  );
+  sessionStorage.setItem(
+    "clientAuth",
+    JSON.stringify({ ...data.client, token: data.token })
+  );
+}
+
 const inputShell = (focused) => ({
   display: "flex",
   alignItems: "center",
@@ -30,9 +45,8 @@ const inputInner = {
   color: "#1a252f"
 };
 
-export default function Register() {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+export default function ClientLogin() {
+  const [clientId, setClientId] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -47,44 +61,25 @@ export default function Register() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
+      const response = await fetch(`${API_BASE_URL}/api/client/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password })
+        body: JSON.stringify({ clientId: clientId.trim(), password })
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        setError(data.message || "Could not create account");
+        setError(data.message || "Invalid credentials");
         return;
       }
 
-      localStorage.setItem("token", data.token);
-      localStorage.setItem("user", JSON.stringify(data.user));
-      navigate("/");
+      persistClientSession(data);
+      navigate("/client");
     } catch {
       setError("Something went wrong. Check your connection and try again.");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const linkBase = {
-    color: "#667eea",
-    fontWeight: 600,
-    textDecoration: "none",
-    borderBottom: "2px solid transparent",
-    transition: "border-color 0.2s ease, color 0.2s ease"
-  };
-
-  const linkHover = (e, enter) => {
-    if (enter) {
-      e.currentTarget.style.borderBottomColor = "#667eea";
-      e.currentTarget.style.color = "#5a67d8";
-    } else {
-      e.currentTarget.style.borderBottomColor = "transparent";
-      e.currentTarget.style.color = "#667eea";
     }
   };
 
@@ -123,12 +118,12 @@ export default function Register() {
           boxShadow:
             "0 4px 6px rgba(0,0,0,0.07), 0 24px 48px rgba(0,0,0,0.18), 0 0 0 1px rgba(255,255,255,0.5) inset",
           padding: "40px 36px 36px",
-          animation: "registerIn 0.45s ease-out"
+          animation: "clientLoginIn 0.45s ease-out"
         }}
       >
         <style>
           {`
-            @keyframes registerIn {
+            @keyframes clientLoginIn {
               from { opacity: 0; transform: translateY(12px) scale(0.98); }
               to { opacity: 1; transform: translateY(0) scale(1); }
             }
@@ -152,7 +147,7 @@ export default function Register() {
             boxShadow: "0 8px 20px rgba(102, 126, 234, 0.4)"
           }}
         >
-          ✨
+          🔐
         </div>
 
         <h1
@@ -164,15 +159,15 @@ export default function Register() {
             letterSpacing: "-0.03em"
           }}
         >
-          Register
+          Client login
         </h1>
         <p style={{ margin: "0 0 28px 0", fontSize: 15, color: "#5c6578", lineHeight: 1.5 }}>
-          Create your host account to run meetings and manage clients.
+          Sign in with the Client ID and password your host gave you.
         </p>
 
         <form onSubmit={handleSubmit} noValidate>
           <label
-            htmlFor="register-name"
+            htmlFor="client-login-id"
             style={{
               display: "block",
               fontSize: 13,
@@ -181,60 +176,29 @@ export default function Register() {
               marginBottom: 8
             }}
           >
-            Name
+            Client ID
           </label>
-          <div style={{ ...inputShell(focusField === "name"), marginBottom: 18 }}>
+          <div style={{ ...inputShell(focusField === "id"), marginBottom: 18 }}>
             <span style={{ fontSize: 18, opacity: 0.55, userSelect: "none" }} aria-hidden>
               👤
             </span>
             <input
-              id="register-name"
+              id="client-login-id"
               type="text"
-              placeholder="Your display name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onFocus={() => setFocusField("name")}
-              onBlur={() => setFocusField((f) => (f === "name" ? null : f))}
+              placeholder="e.g. CLI-XXXX"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              onFocus={() => setFocusField("id")}
+              onBlur={() => setFocusField((f) => (f === "id" ? null : f))}
               style={inputInner}
-              autoComplete="name"
+              autoComplete="username"
               required
               disabled={loading}
             />
           </div>
 
           <label
-            htmlFor="register-email"
-            style={{
-              display: "block",
-              fontSize: 13,
-              fontWeight: 600,
-              color: "#3d4a5c",
-              marginBottom: 8
-            }}
-          >
-            Email
-          </label>
-          <div style={{ ...inputShell(focusField === "email"), marginBottom: 18 }}>
-            <span style={{ fontSize: 18, opacity: 0.55, userSelect: "none" }} aria-hidden>
-              ✉️
-            </span>
-            <input
-              id="register-email"
-              type="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              onFocus={() => setFocusField("email")}
-              onBlur={() => setFocusField((f) => (f === "email" ? null : f))}
-              style={inputInner}
-              autoComplete="email"
-              required
-              disabled={loading}
-            />
-          </div>
-
-          <label
-            htmlFor="register-password"
+            htmlFor="client-login-password"
             style={{
               display: "block",
               fontSize: 13,
@@ -250,15 +214,15 @@ export default function Register() {
               🔑
             </span>
             <input
-              id="register-password"
+              id="client-login-password"
               type={showPassword ? "text" : "password"}
-              placeholder="Choose a strong password"
+              placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onFocus={() => setFocusField("pw")}
               onBlur={() => setFocusField((f) => (f === "pw" ? null : f))}
               style={inputInner}
-              autoComplete="new-password"
+              autoComplete="current-password"
               required
               disabled={loading}
             />
@@ -306,7 +270,7 @@ export default function Register() {
                 color: "#842029",
                 fontSize: 14,
                 lineHeight: 1.45,
-                animation: "registerIn 0.25s ease-out"
+                animation: "clientLoginIn 0.25s ease-out"
               }}
             >
               {error}
@@ -360,7 +324,7 @@ export default function Register() {
                 aria-hidden
               />
             )}
-            {loading ? "Creating account…" : "Register"}
+            {loading ? "Signing in…" : "Sign in"}
           </button>
         </form>
 
@@ -372,14 +336,26 @@ export default function Register() {
             color: "#6b7280"
           }}
         >
-          Already have an account?{" "}
+          Are you a host?{" "}
           <Link
             to="/login"
-            style={linkBase}
-            onMouseEnter={(e) => linkHover(e, true)}
-            onMouseLeave={(e) => linkHover(e, false)}
+            style={{
+              color: "#667eea",
+              fontWeight: 600,
+              textDecoration: "none",
+              borderBottom: "2px solid transparent",
+              transition: "border-color 0.2s ease, color 0.2s ease"
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderBottomColor = "#667eea";
+              e.currentTarget.style.color = "#5a67d8";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderBottomColor = "transparent";
+              e.currentTarget.style.color = "#667eea";
+            }}
           >
-            Login
+            Admin login
           </Link>
         </p>
       </div>
