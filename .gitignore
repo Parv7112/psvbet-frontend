@@ -6,8 +6,6 @@ dist/
 build/
 
 # Environment variables
-.env
-.env.local
 .env.development.local
 .env.test.local
 .env.production.local
@@ -22,7 +20,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Editor directories and files
-.vscode/
 .idea/
 *.suo
 *.ntvs*
@@ -47,3 +44,7 @@ coverage/
 # Temporary files
 *.tmp
 *.temp
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+config.bat
