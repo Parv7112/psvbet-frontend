@@ -3,6 +3,33 @@ import { useState, useEffect } from "react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
 
+/** Saves a remote file locally; uses blob + object URL so the browser downloads instead of navigating. */
+async function triggerDirectDownload(url, filename) {
+  const name = filename || "recording.webm";
+  try {
+    const res = await fetch(url, { mode: "cors" });
+    if (!res.ok) throw new Error(String(res.status));
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+}
+
 export default function Live() {
   const navigate = useNavigate();
   const user = JSON.parse(localStorage.getItem("user") || "{}");
@@ -10,10 +37,11 @@ export default function Live() {
   const [meetingTitle, setMeetingTitle] = useState("");
   const [joinUrl, setJoinUrl] = useState("");
   const [myMeetings, setMyMeetings] = useState([]);
-  const [activeView, setActiveView] = useState("dashboard"); // "dashboard", "meetings", "clients", or "matches"
+  const [activeView, setActiveView] = useState("dashboard"); // "dashboard", "meetings", "recordings", "clients", or "matches"
   const [meetingsTab, setMeetingsTab] = useState("active"); // "active" or "closed"
   const [matchesTab, setMatchesTab] = useState("live"); // "live", "upcoming", or "ended"
   const [clients, setClients] = useState([]);
+  const [clientRecordingsByClient, setClientRecordingsByClient] = useState([]);
   const [showCreateClient, setShowCreateClient] = useState(false);
   const [clientForm, setClientForm] = useState({ name: "", number: "" });
   const [editingClient, setEditingClient] = useState(null);
@@ -27,10 +55,16 @@ export default function Live() {
   const [selectedMeetingMatch, setSelectedMeetingMatch] = useState("");
   const [matchSearchQuery, setMatchSearchQuery] = useState("");
   const [showMatchDropdown, setShowMatchDropdown] = useState(false);
+  /** Recordings tab: collapsible meeting → client. Meeting default expanded; client default collapsed. */
+  const [recordingsMeetingExpanded, setRecordingsMeetingExpanded] = useState({});
+  const [recordingsClientExpanded, setRecordingsClientExpanded] = useState({});
 
   useEffect(() => {
     if (activeView === "meetings") {
       fetchMyMeetings();
+    } else if (activeView === "recordings") {
+      fetchMyMeetings();
+      fetchClientRecordingsByClient();
     } else if (activeView === "clients") {
       fetchClients();
     } else if (activeView === "dashboard") {
@@ -41,6 +75,22 @@ export default function Live() {
       fetchCricketMatches();
     }
   }, [activeView]);
+
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtml = html.style.overflow;
+    const prevBodyOverflow = body.style.overflow;
+    const prevBodyMargin = body.style.margin;
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    body.style.margin = "0";
+    return () => {
+      html.style.overflow = prevHtml;
+      body.style.overflow = prevBodyOverflow;
+      body.style.margin = prevBodyMargin;
+    };
+  }, []);
 
   const handleLogout = () => {
     localStorage.removeItem("token");
@@ -57,9 +107,21 @@ export default function Live() {
         }
       });
       const data = await response.json();
+      if (response.status === 401) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        setMyMeetings([]);
+        navigate("/login");
+        return;
+      }
+      if (!response.ok || !Array.isArray(data)) {
+        setMyMeetings([]);
+        return;
+      }
       setMyMeetings(data);
     } catch (error) {
       console.error("Failed to fetch meetings");
+      setMyMeetings([]);
     }
   };
 
@@ -123,8 +185,36 @@ export default function Live() {
     }
   };
 
-  const activeMeetings = myMeetings.filter(m => m.isActive);
-  const closedMeetings = myMeetings.filter(m => !m.isActive);
+  const safeMeetings = Array.isArray(myMeetings) ? myMeetings : [];
+  const activeMeetings = safeMeetings.filter((m) => m.isActive);
+  const closedMeetings = safeMeetings.filter((m) => !m.isActive);
+
+  const fetchClientRecordingsByClient = async () => {
+    try {
+      const token = localStorage.getItem("token");
+      const response = await fetch(`${API_BASE_URL}/api/meeting/recordings-by-client`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      setClientRecordingsByClient(data.clients || []);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const recordingsClientKey = (roomId, clientMongoId) => `${roomId}::${clientMongoId}`;
+  const isRecordingsMeetingOpen = (roomId) => recordingsMeetingExpanded[roomId] !== false;
+  const toggleRecordingsMeeting = (roomId) => {
+    setRecordingsMeetingExpanded((prev) => {
+      const open = prev[roomId] !== false;
+      return { ...prev, [roomId]: !open };
+    });
+  };
+  const isRecordingsClientOpen = (key) => recordingsClientExpanded[key] === true;
+  const toggleRecordingsClient = (key) => {
+    setRecordingsClientExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const fetchClients = async () => {
     try {
@@ -135,9 +225,21 @@ export default function Live() {
         }
       });
       const data = await response.json();
+      if (response.status === 401) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        setClients([]);
+        navigate("/login");
+        return;
+      }
+      if (!response.ok || !Array.isArray(data)) {
+        setClients([]);
+        return;
+      }
       setClients(data);
     } catch (error) {
       console.error("Failed to fetch clients");
+      setClients([]);
     }
   };
 
@@ -302,22 +404,47 @@ export default function Live() {
   };
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#f5f6fa" }}>
-      {/* Sidebar */}
-      <div style={{ 
-        width: 280, 
-        background: "linear-gradient(180deg, #667eea 0%, #764ba2 100%)", 
-        color: "white",
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
         display: "flex",
-        flexDirection: "column",
-        boxShadow: "2px 0 10px rgba(0,0,0,0.1)"
-      }}>
+        overflow: "hidden",
+        background: "#f5f6fa"
+      }}
+    >
+      {/* Sidebar */}
+      <div
+        style={{
+          width: 280,
+          minWidth: 240,
+          flexShrink: 0,
+          alignSelf: "stretch",
+          minHeight: 0,
+          background: "linear-gradient(180deg, #667eea 0%, #764ba2 100%)",
+          color: "white",
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "2px 0 10px rgba(0,0,0,0.1)",
+          overflow: "hidden",
+          overflowX: "hidden",
+          overflowY: "hidden"
+        }}
+      >
         <div style={{ padding: 30, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
           <h2 style={{ margin: "0 0 5px 0", fontSize: 24 }}>PSVBet</h2>
           <p style={{ margin: 0, fontSize: 14, opacity: 0.9 }}>Welcome, {user.name}</p>
         </div>
 
-        <nav style={{ flex: 1, padding: "20px 0" }}>
+        <nav
+          style={{
+            flex: 1,
+            minHeight: 0,
+            padding: "20px 0",
+            overflow: "hidden",
+            overflowY: "hidden"
+          }}
+        >
           <button
             onClick={() => setActiveView("dashboard")}
             style={{
@@ -362,6 +489,29 @@ export default function Live() {
           >
             <span>📹</span>
             <span>My Meetings</span>
+          </button>
+
+          <button
+            onClick={() => setActiveView("recordings")}
+            style={{
+              width: "100%",
+              padding: "15px 30px",
+              background: activeView === "recordings" ? "rgba(255,255,255,0.2)" : "transparent",
+              border: "none",
+              color: "white",
+              textAlign: "left",
+              cursor: "pointer",
+              fontSize: 16,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              transition: "all 0.3s"
+            }}
+            onMouseOver={(e) => e.target.style.background = "rgba(255,255,255,0.2)"}
+            onMouseOut={(e) => e.target.style.background = activeView === "recordings" ? "rgba(255,255,255,0.2)" : "transparent"}
+          >
+            <span>🎙️</span>
+            <span>Recordings</span>
           </button>
 
           <button
@@ -460,7 +610,15 @@ export default function Live() {
       </div>
 
       {/* Main Content */}
-      <div style={{ flex: 1, overflow: "auto" }}>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "auto",
+          WebkitOverflowScrolling: "touch"
+        }}
+      >
         {/* Header */}
         <div style={{ 
           background: "white", 
@@ -471,8 +629,34 @@ export default function Live() {
           alignItems: "center"
         }}>
           <h1 style={{ margin: 0, fontSize: 28, color: "#2c3e50" }}>
-            {activeView === "dashboard" ? "Dashboard" : activeView === "meetings" ? "My Meetings" : activeView === "clients" ? "Clients" : "Cricket Matches"}
+            {activeView === "dashboard"
+              ? "Dashboard"
+              : activeView === "meetings"
+                ? "My Meetings"
+                : activeView === "recordings"
+                  ? "Recordings"
+                  : activeView === "clients"
+                    ? "Clients"
+                    : "Cricket Matches"}
           </h1>
+          {activeView === "meetings" && (
+            <button
+              type="button"
+              onClick={() => setShowCreateMeeting(true)}
+              style={{
+                padding: "10px 20px",
+                background: "#667eea",
+                color: "white",
+                border: "none",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontSize: 14,
+                fontWeight: 500
+              }}
+            >
+              + Create Meeting
+            </button>
+          )}
           {activeView === "clients" && (
             <button
               onClick={() => {
@@ -494,6 +678,27 @@ export default function Live() {
               + Add Client
             </button>
           )}
+          {activeView === "recordings" && (
+            <button
+              type="button"
+              onClick={() => {
+                fetchMyMeetings();
+                fetchClientRecordingsByClient();
+              }}
+              style={{
+                padding: "10px 20px",
+                background: "#667eea",
+                color: "white",
+                border: "none",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontSize: 14,
+                fontWeight: 500
+              }}
+            >
+              Refresh
+            </button>
+          )}
         </div>
 
         {/* Content Area */}
@@ -510,7 +715,7 @@ export default function Live() {
                   boxShadow: "0 4px 12px rgba(102,126,234,0.3)"
                 }}>
                   <div style={{ fontSize: 14, opacity: 0.9, marginBottom: 8 }}>Total Meetings</div>
-                  <div style={{ fontSize: 36, fontWeight: 700 }}>{myMeetings.length}</div>
+                  <div style={{ fontSize: 36, fontWeight: 700 }}>{safeMeetings.length}</div>
                 </div>
 
                 <div style={{
@@ -563,7 +768,7 @@ export default function Live() {
                       View All
                     </button>
                   </div>
-                  {myMeetings.slice(0, 5).map((meeting) => (
+                  {safeMeetings.slice(0, 5).map((meeting) => (
                     <div key={meeting._id} style={{
                       padding: "12px 0",
                       borderBottom: "1px solid #f0f0f0",
@@ -577,19 +782,23 @@ export default function Live() {
                           {new Date(meeting.createdAt).toLocaleDateString()}
                         </div>
                       </div>
-                      <span style={{
-                        padding: "4px 12px",
-                        background: meeting.isActive ? "#d4edda" : "#f8d7da",
-                        color: meeting.isActive ? "#155724" : "#721c24",
-                        borderRadius: 12,
-                        fontSize: 11,
-                        fontWeight: 600
-                      }}>
-                        {meeting.isActive ? "ACTIVE" : "CLOSED"}
-                      </span>
+                      {!meeting.isActive && (
+                        <span
+                          style={{
+                            padding: "4px 12px",
+                            background: "#f8d7da",
+                            color: "#721c24",
+                            borderRadius: 12,
+                            fontSize: 11,
+                            fontWeight: 600
+                          }}
+                        >
+                          CLOSED
+                        </span>
+                      )}
                     </div>
                   ))}
-                  {myMeetings.length === 0 && (
+                  {safeMeetings.length === 0 && (
                     <div style={{ textAlign: "center", padding: 40, color: "#95a5a6" }}>
                       No meetings yet
                     </div>
@@ -844,18 +1053,8 @@ export default function Live() {
                         border: "2px solid transparent"
                       }}>
                         <div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                          <div style={{ marginBottom: 8 }}>
                             <h3 style={{ margin: 0, color: "#2c3e50" }}>{meeting.title}</h3>
-                            <span style={{ 
-                              padding: "4px 12px", 
-                              background: "#27ae60", 
-                              color: "white", 
-                              borderRadius: 12, 
-                              fontSize: 12,
-                              fontWeight: 600
-                            }}>
-                              ACTIVE
-                            </span>
                           </div>
                           <p style={{ margin: "0 0 4px 0", fontSize: 14, color: "#7f8c8d" }}>
                             📅 Created: {new Date(meeting.createdAt).toLocaleString()}
@@ -880,29 +1079,6 @@ export default function Live() {
                           >
                             Join
                           </button>
-                          {meeting.recordings && meeting.recordings.length > 0 && (
-                            <button
-                              onClick={() =>
-                                window.open(
-                                  `/meeting/${meeting.roomId}/recordings`,
-                                  "_blank",
-                                  "noopener,noreferrer"
-                                )
-                              }
-                              style={{
-                                padding: "10px 20px",
-                                background: "#667eea",
-                                color: "white",
-                                border: "none",
-                                borderRadius: 8,
-                                cursor: "pointer",
-                                fontWeight: 500,
-                                fontSize: 14
-                              }}
-                            >
-                              Recordings
-                            </button>
-                          )}
                           <button 
                             onClick={() => {
                               const link = `${window.location.origin}/meeting/${meeting.roomId}`;
@@ -1009,29 +1185,6 @@ export default function Live() {
                           >
                             Reopen
                           </button>
-                          {meeting.recordings && meeting.recordings.length > 0 && (
-                            <button
-                              onClick={() =>
-                                window.open(
-                                  `/meeting/${meeting.roomId}/recordings`,
-                                  "_blank",
-                                  "noopener,noreferrer"
-                                )
-                              }
-                              style={{
-                                padding: "10px 20px",
-                                background: "#667eea",
-                                color: "white",
-                                border: "none",
-                                borderRadius: 8,
-                                cursor: "pointer",
-                                fontWeight: 500,
-                                fontSize: 14
-                              }}
-                            >
-                              Recordings
-                            </button>
-                          )}
                         </div>
                       </div>
                     ))}
@@ -1040,6 +1193,330 @@ export default function Live() {
               )}
             </div>
           )}
+
+          {activeView === "recordings" && (() => {
+            const clientsWithSegments = clientRecordingsByClient.filter(
+              (c) => (c.segments || []).length > 0
+            );
+            const meetingByRoomId = new Map(safeMeetings.map((m) => [m.roomId, m]));
+            const meetingMap = new Map();
+            for (const block of clientsWithSegments) {
+              const clientKey = block.clientMongoId || block.clientLoginId;
+              for (const seg of block.segments || []) {
+                const roomId = seg.roomId;
+                if (!meetingMap.has(roomId)) {
+                  const meeting = meetingByRoomId.get(roomId);
+                  meetingMap.set(roomId, {
+                    roomId,
+                    meetingTitle: meeting?.title || seg.meetingTitle || "Meeting",
+                    matchName: meeting?.selectedMatch?.matchName || seg.matchName || null,
+                    league: meeting?.selectedMatch?.league || seg.matchLeague || null,
+                    clients: new Map()
+                  });
+                }
+                const mEntry = meetingMap.get(roomId);
+                if (!mEntry.clients.has(clientKey)) {
+                  mEntry.clients.set(clientKey, {
+                    clientMongoId: block.clientMongoId,
+                    clientName: block.name,
+                    clientLoginId: block.clientLoginId,
+                    segments: []
+                  });
+                }
+                mEntry.clients.get(clientKey).segments.push(seg);
+              }
+            }
+            const meetingTree = Array.from(meetingMap.values())
+              .map((m) => {
+                const clientsArr = Array.from(m.clients.values())
+                  .map((c) => ({
+                    ...c,
+                    segments: (c.segments || []).sort(
+                      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+                    )
+                  }))
+                  .sort((a, b) =>
+                    (a.clientName || "").localeCompare(b.clientName || "", undefined, {
+                      sensitivity: "base"
+                    })
+                  );
+                const latest = Math.max(
+                  0,
+                  ...clientsArr.flatMap((c) =>
+                    (c.segments || []).map((s) => new Date(s.createdAt).getTime())
+                  )
+                );
+                return { ...m, clients: clientsArr, _sort: latest };
+              })
+              .sort((a, b) => b._sort - a._sort)
+              .map(({ _sort, ...rest }) => rest);
+
+            const segmentRowStyle = {
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              padding: "10px 12px",
+              background: "#f8f9fa",
+              borderRadius: 8,
+              fontSize: 13,
+              color: "#34495e"
+            };
+            const viewBtnStyle = {
+              padding: "8px 14px",
+              background: "linear-gradient(180deg, #7689f0 0%, #667eea 100%)",
+              color: "white",
+              borderRadius: 8,
+              textDecoration: "none",
+              fontWeight: 600,
+              fontSize: 12,
+              whiteSpace: "nowrap",
+              boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
+              display: "inline-block"
+            };
+            const downloadBtnStyle = {
+              padding: "8px 14px",
+              background: "linear-gradient(180deg, #3dbd6e 0%, #27ae60 100%)",
+              color: "white",
+              border: "none",
+              borderRadius: 8,
+              textDecoration: "none",
+              fontWeight: 600,
+              fontSize: 12,
+              whiteSpace: "nowrap",
+              cursor: "pointer",
+              fontFamily: "inherit",
+              boxShadow: "0 1px 2px rgba(0,0,0,0.06)"
+            };
+            const collapseBtnStyle = {
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              width: "100%",
+              textAlign: "left",
+              padding: "12px 14px",
+              border: "none",
+              borderRadius: 10,
+              cursor: "pointer",
+              fontSize: 15,
+              fontWeight: 700,
+              color: "#2c3e50",
+              background: "#eef1f8"
+            };
+            const clientCollapseBtnStyle = {
+              ...collapseBtnStyle,
+              fontSize: 14,
+              fontWeight: 600,
+              background: "#f4f6fa",
+              marginLeft: 12,
+              width: "calc(100% - 12px)"
+            };
+            return (
+              <div>
+                <p style={{ color: "#7f8c8d", marginBottom: 28, maxWidth: 720, lineHeight: 1.5 }}>
+                  Everything listed here is tied to your host account. Use{" "}
+                  <strong>Refresh</strong> after meetings. When a logged-in client <strong>unmutes</strong>,
+                  a grid of meeting video (their tile and others) plus their mic is saved until they mute.
+                </p>
+
+                <div
+                  style={{
+                    background: "white",
+                    padding: 24,
+                    borderRadius: 12,
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.1)"
+                  }}
+                >
+                  <h2 style={{ margin: "0 0 8px 0", fontSize: 18, color: "#2c3e50" }}>
+                    Client meeting recordings
+                  </h2>
+                  <p style={{ margin: "0 0 16px 0", fontSize: 13, color: "#95a5a6" }}>
+                    Expand a meeting, then a client, to view or download clips.
+                  </p>
+                  {meetingTree.length === 0 ? (
+                    <div style={{ color: "#95a5a6", fontSize: 14 }}>No client recordings yet.</div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {meetingTree.map((meeting) => {
+                        const mOpen = isRecordingsMeetingOpen(meeting.roomId);
+                        const subtitle = [
+                          meeting.matchName,
+                          meeting.league ? `(${meeting.league})` : null
+                        ]
+                          .filter(Boolean)
+                          .join(" ");
+                        return (
+                          <div
+                            key={meeting.roomId}
+                            style={{
+                              border: "1px solid #e1e4e8",
+                              borderRadius: 12,
+                              overflow: "hidden"
+                            }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => toggleRecordingsMeeting(meeting.roomId)}
+                              style={collapseBtnStyle}
+                            >
+                              <span aria-hidden style={{ fontSize: 12, color: "#667eea" }}>
+                                {mOpen ? "▼" : "▶"}
+                              </span>
+                              <span style={{ flex: 1 }}>
+                                {meeting.meetingTitle}
+                                {subtitle ? (
+                                  <span
+                                    style={{
+                                      display: "block",
+                                      marginTop: 4,
+                                      fontWeight: 500,
+                                      fontSize: 13,
+                                      color: "#7f8c8d"
+                                    }}
+                                  >
+                                    {subtitle}
+                                  </span>
+                                ) : null}
+                                <span
+                                  style={{
+                                    display: "block",
+                                    marginTop: 4,
+                                    fontWeight: 500,
+                                    fontSize: 12,
+                                    fontFamily: "monospace",
+                                    color: "#95a5a6"
+                                  }}
+                                >
+                                  Room: {meeting.roomId}
+                                </span>
+                              </span>
+                            </button>
+                            {mOpen && (
+                              <div style={{ padding: "8px 12px 14px", display: "grid", gap: 8 }}>
+                                {meeting.clients.map((cl) => {
+                                  const ck = recordingsClientKey(meeting.roomId, cl.clientMongoId);
+                                  const cOpen = isRecordingsClientOpen(ck);
+                                  return (
+                                    <div key={cl.clientMongoId}>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleRecordingsClient(ck)}
+                                        style={clientCollapseBtnStyle}
+                                      >
+                                        <span aria-hidden style={{ fontSize: 12, color: "#667eea" }}>
+                                          {cOpen ? "▼" : "▶"}
+                                        </span>
+                                        <span style={{ flex: 1 }}>
+                                          {cl.clientName || "Client"}{" "}
+                                          <span
+                                            style={{
+                                              fontFamily: "monospace",
+                                              fontWeight: 500,
+                                              fontSize: 13,
+                                              color: "#7f8c8d"
+                                            }}
+                                          >
+                                            ({cl.clientLoginId || "—"})
+                                          </span>
+                                          <span
+                                            style={{
+                                              display: "block",
+                                              marginTop: 4,
+                                              fontSize: 12,
+                                              fontWeight: 500,
+                                              color: "#95a5a6"
+                                            }}
+                                          >
+                                            {(cl.segments || []).length} recording
+                                            {(cl.segments || []).length === 1 ? "" : "s"}
+                                          </span>
+                                        </span>
+                                      </button>
+                                      {cOpen && (
+                                        <div
+                                          style={{
+                                            marginLeft: 24,
+                                            marginTop: 6,
+                                            display: "grid",
+                                            gap: 8
+                                          }}
+                                        >
+                                          {(cl.segments || []).map((seg, idx) => (
+                                            <div key={seg._id || idx} style={segmentRowStyle}>
+                                              <div>
+                                                <div>
+                                                  <strong>Saved:</strong>{" "}
+                                                  {seg.createdAt
+                                                    ? new Date(seg.createdAt).toLocaleString()
+                                                    : "—"}
+                                                </div>
+                                                {seg.segmentStartedAt && (
+                                                  <div
+                                                    style={{
+                                                      color: "#7f8c8d",
+                                                      marginTop: 4,
+                                                      fontSize: 12
+                                                    }}
+                                                  >
+                                                    Mic on from:{" "}
+                                                    {new Date(seg.segmentStartedAt).toLocaleString()}
+                                                  </div>
+                                                )}
+                                              </div>
+                                              {seg.relativePath && (() => {
+                                                const fileUrl = `${API_BASE_URL}/uploads/${seg.relativePath}`;
+                                                const fname =
+                                                  seg.filename ||
+                                                  seg.relativePath.split("/").pop() ||
+                                                  "recording.webm";
+                                                return (
+                                                  <div
+                                                    style={{
+                                                      display: "flex",
+                                                      flexWrap: "wrap",
+                                                      gap: 8,
+                                                      alignItems: "center"
+                                                    }}
+                                                  >
+                                                    <a
+                                                      href={fileUrl}
+                                                      target="_blank"
+                                                      rel="noopener noreferrer"
+                                                      style={viewBtnStyle}
+                                                    >
+                                                      View
+                                                    </a>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() =>
+                                                        triggerDirectDownload(fileUrl, fname)
+                                                      }
+                                                      style={downloadBtnStyle}
+                                                    >
+                                                      Download
+                                                    </button>
+                                                  </div>
+                                                );
+                                              })()}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {activeView === "clients" && (
             <div>
@@ -1992,7 +2469,11 @@ export default function Live() {
               maxWidth: 500,
               width: "90%"
             }}
-            onClick={() => setShowMatchDropdown(false)}
+            onClick={(e) => {
+              // Only close when clicking the card padding itself — not bubbled clicks from inputs
+              // or the match list (those were closing the dropdown immediately after focus).
+              if (e.target === e.currentTarget) setShowMatchDropdown(false);
+            }}
           >
             <h2 style={{ margin: "0 0 20px 0", color: "#2c3e50" }}>Create New Meeting</h2>
             
