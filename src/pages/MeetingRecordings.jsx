@@ -193,10 +193,37 @@ export default function MeetingRecordings() {
             </div>
           ) : (
             <div style={{ display: "grid", gap: 14 }}>
-              {recordings
-                .slice()
-                .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-                .map((r) => (
+              {["client", "host"].flatMap((kind) => {
+                const filtered = recordings.filter((rec) =>
+                  kind === "client"
+                    ? rec.recordingSource === "client"
+                    : rec.recordingSource !== "client"
+                );
+                if (filtered.length === 0) return [];
+                const label =
+                  kind === "client" ? "Client mic segments" : "Host recordings";
+                return [
+                  <div key={`h-${kind}`} style={{ marginTop: 6, marginBottom: 4 }}>
+                    <div
+                      style={{
+                        fontSize: 15,
+                        fontWeight: 800,
+                        color: "#2c3e50",
+                        marginBottom: 10
+                      }}
+                    >
+                      {label}{" "}
+                      <span style={{ fontWeight: 600, color: "#7f8c8d" }}>
+                        ({filtered.length})
+                      </span>
+                    </div>
+                    <div style={{ display: "grid", gap: 14 }}>
+                      {filtered
+                        .slice()
+                        .sort(
+                          (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+                        )
+                        .map((r) => (
                   <div
                     key={r._id}
                     style={{
@@ -217,8 +244,20 @@ export default function MeetingRecordings() {
                     >
                       <div style={{ minWidth: 240 }}>
                         <div style={{ fontWeight: 800, color: "#2c3e50" }}>
-                          {new Date(r.createdAt).toLocaleString()}
+                          Saved: {new Date(r.createdAt).toLocaleString()}
                         </div>
+                        {r.segmentStartedAt && (
+                          <div
+                            style={{
+                              marginTop: 4,
+                              fontSize: 12,
+                              color: "#7f8c8d"
+                            }}
+                          >
+                            Mic on from:{" "}
+                            {new Date(r.segmentStartedAt).toLocaleString()}
+                          </div>
+                        )}
                         <div
                           style={{
                             marginTop: 6,
@@ -230,7 +269,21 @@ export default function MeetingRecordings() {
                           }}
                         >
                           <span>
-                            By: <b>{r.byName || "Host"}</b>
+                            {r.recordingSource === "client" ? (
+                              <>
+                                Client: <b>{r.byName || "—"}</b>
+                                {r.clientLoginId && (
+                                  <span style={{ fontFamily: "monospace" }}>
+                                    {" "}
+                                    ({r.clientLoginId})
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                By: <b>{r.byName || "Host"}</b>
+                              </>
+                            )}
                           </span>
                           <span>{formatBytes(r.sizeBytes)}</span>
                           {r.mimeType && <span>{r.mimeType}</span>}
@@ -308,7 +361,11 @@ export default function MeetingRecordings() {
                       </div>
                     )}
                   </div>
-                ))}
+                        ))}
+                    </div>
+                  </div>
+                ];
+              })}
             </div>
           )}
         </div>
