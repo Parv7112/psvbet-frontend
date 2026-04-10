@@ -6,11 +6,158 @@ import socket from "../socket";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
 
+/** Readable status line (e.g. "1 run" vs "1 runs") */
+function formatCricketStatusText(text) {
+  if (text == null) return text;
+  return String(text).replace(/\b(\d+)\s+runs\b/gi, (_, n) => {
+    const num = Number(n);
+    return `${n} ${num === 1 ? "run" : "runs"}`;
+  });
+}
+
+function teamAcronymFromFullName(fullName) {
+  const words = String(fullName || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length >= 2) {
+    return words.map((w) => w[0]).join("").toLowerCase();
+  }
+  return "";
+}
+
+function teamNameMatchesShortGuess(guess, fullName) {
+  const g = String(guess || "")
+    .trim()
+    .toLowerCase();
+  const f = String(fullName || "")
+    .trim()
+    .toLowerCase();
+  if (!g || !f) return false;
+  if (f.includes(g) || g.includes(f)) return true;
+  const acronym = teamAcronymFromFullName(fullName);
+  const gAlnum = g.replace(/[^a-z0-9]/g, "");
+  if (acronym && gAlnum === acronym) return true;
+  if (gAlnum.length <= 4 && acronym.startsWith(gAlnum)) return true;
+  const first = f.split(/\s+/)[0] || "";
+  if (g.length >= 3 && first.startsWith(g)) return true;
+  return false;
+}
+
+/** Team currently batting in a chase — status often uses abbreviations (e.g. "LSG need 1 run"). */
+function battingTeamFromChaseStatus(statusInfo, homeTeam, awayTeam) {
+  const s = String(statusInfo || "").trim();
+  let m = s.match(/^(.+?)\s+need\s+\d+\s+runs?\b/im);
+  if (!m) m = s.match(/^(.+?)\s+require(?:s)?\s+\d+\s+runs?\b/im);
+  if (!m) m = s.match(/^(.+?)\s+need\s+\d+\s+more\s+runs?\b/im);
+  if (!m) return null;
+  const guess = m[1].trim();
+  if (teamNameMatchesShortGuess(guess, homeTeam)) return homeTeam;
+  if (teamNameMatchesShortGuess(guess, awayTeam)) return awayTeam;
+  return null;
+}
+
+/** Finished match — "LSG won by 3 wickets", "Lucknow Super Giants won by …" */
+function winningTeamFromResultStatus(statusInfo, homeTeam, awayTeam) {
+  const s = String(statusInfo || "").trim();
+  if (!s) return null;
+  const patterns = [/^(.+?)\s+won\s+by\b/i, /^(.+?)\s+won\b/i, /\b(.+?)\s+won\s+by\b/i];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (!m) continue;
+    let guess = m[1].trim();
+    guess = guess.replace(/\s*\([^)]*\)\s*$/, "").trim();
+    guess = guess.replace(/^(result|score)\s*:\s*/i, "").trim();
+    if (teamNameMatchesShortGuess(guess, homeTeam)) return homeTeam;
+    if (teamNameMatchesShortGuess(guess, awayTeam)) return awayTeam;
+  }
+  return null;
+}
+
+/** Ball-by-ball: stable chronological order */
+function getSortedCommentBalls(comments) {
+  if (!comments || typeof comments !== "object") return [];
+  const keys = Object.keys(comments).sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+    return String(a).localeCompare(String(b), undefined, { numeric: true });
+  });
+  const balls = [];
+  for (const k of keys) {
+    const chunk = comments[k];
+    if (Array.isArray(chunk)) balls.push(...chunk);
+  }
+  balls.sort((a, b) => {
+    const oa = parseFloat(String(a?.overs ?? "").replace(/[^\d.]/g, "")) || 0;
+    const ob = parseFloat(String(b?.overs ?? "").replace(/[^\d.]/g, "")) || 0;
+    if (oa !== ob) return oa - ob;
+    return 0;
+  });
+  return balls;
+}
+
+/** Integer before decimal in over notation (19.4 and 19.5 share same "over" group in many feeds). */
+function getOverIntegerKey(overs) {
+  if (overs == null || overs === "") return null;
+  const s = String(overs).trim();
+  const dot = s.indexOf(".");
+  const head = dot === -1 ? s : s.slice(0, dot);
+  const n = parseInt(head, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+function getBallsInCurrentOver(sortedBalls) {
+  if (!sortedBalls.length) return [];
+  const latest = sortedBalls[sortedBalls.length - 1];
+  const key = getOverIntegerKey(latest.overs);
+  if (key === null) return sortedBalls.slice(-6);
+  const out = [];
+  for (let i = sortedBalls.length - 1; i >= 0; i--) {
+    if (getOverIntegerKey(sortedBalls[i].overs) !== key) break;
+    out.push(sortedBalls[i]);
+  }
+  out.reverse();
+  return out.length ? out : sortedBalls.slice(-6);
+}
+
+function cleanupClientMeetingCapture(c) {
+  try {
+    if (c.raf) cancelAnimationFrame(c.raf);
+  } catch {
+    /* ignore */
+  }
+  c.raf = null;
+  c.canvas = null;
+  c.ctx = null;
+  if (c.audioSources) {
+    for (const source of c.audioSources.values()) {
+      try {
+        source.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    c.audioSources.clear();
+  }
+  if (c.videoEls) c.videoEls.clear();
+  try {
+    c.audioCtx?.close();
+  } catch {
+    /* ignore */
+  }
+  c.audioCtx = null;
+  c.dest = null;
+  c.mixedStream = null;
+}
+
 export default function Meeting() {
   const { roomId } = useParams();
   const navigate = useNavigate();
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState({});
+  /** peerId -> whether their camera is on (from socket; WebRTC track mute is unreliable for “camera off”). */
+  const [remoteCameraOnByPeer, setRemoteCameraOnByPeer] = useState({});
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [meetingInfo, setMeetingInfo] = useState(null);
@@ -43,6 +190,11 @@ export default function Meeting() {
   const [socketConnected, setSocketConnected] = useState(socket.connected);
   const [peerConnected, setPeerConnected] = useState(false);
   const [webrtcIssue, setWebrtcIssue] = useState("");
+  const [clientRecordingError, setClientRecordingError] = useState("");
+  const [clientMicCaptureActive, setClientMicCaptureActive] = useState(false);
+
+  const remoteStreamsRef = useRef({});
+  remoteStreamsRef.current = remoteStreams;
   
   const localVideoRef = useRef();
   const peerInstance = useRef(null);
@@ -54,6 +206,7 @@ export default function Meeting() {
   const privateAudioStream = useRef(null);
   const silentAudioTracks = useRef(new Map()); // peerId -> MediaStreamTrack (disabled clone)
   const hasJoinedMeeting = useRef(false);
+  const isHostRef = useRef(false);
   const recordingRef = useRef({
     recorder: null,
     chunks: [],
@@ -70,6 +223,285 @@ export default function Meeting() {
     audioSources: new Map(),
     mixedStream: null
   });
+  const clientMicRecorderRef = useRef({
+    recorder: null,
+    chunks: [],
+    segmentStartedAt: null,
+    canvas: null,
+    ctx: null,
+    raf: null,
+    audioCtx: null,
+    dest: null,
+    videoEls: new Map(),
+    audioSources: new Map(),
+    mixedStream: null
+  });
+  const stopClientMicResolverRef = useRef(null);
+
+  const getClientJwt = useCallback(() => {
+    let token = null;
+    try {
+      const raw = sessionStorage.getItem("clientAuth");
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p.token) token = p.token;
+      }
+    } catch {
+      /* ignore */
+    }
+    if (!token) token = localStorage.getItem("clientToken");
+    if (token) {
+      try {
+        const raw = sessionStorage.getItem("clientAuth");
+        if (raw) {
+          const p = JSON.parse(raw);
+          if (!p.token) {
+            sessionStorage.setItem("clientAuth", JSON.stringify({ ...p, token }));
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return token;
+  }, []);
+
+  const stopClientMicRecordingAndUpload = useCallback(() => {
+    return new Promise((resolve) => {
+      const c = clientMicRecorderRef.current;
+      if (!c.recorder) {
+        resolve();
+        return;
+      }
+      stopClientMicResolverRef.current = resolve;
+      try {
+        if (c.raf) cancelAnimationFrame(c.raf);
+      } catch {
+        /* ignore */
+      }
+      c.raf = null;
+      try {
+        if (c.recorder.state === "recording") {
+          c.recorder.requestData();
+        }
+      } catch {
+        /* ignore */
+      }
+      try {
+        c.recorder.stop();
+      } catch {
+        stopClientMicResolverRef.current = null;
+        setClientMicCaptureActive(false);
+        cleanupClientMeetingCapture(c);
+        resolve();
+      }
+    });
+  }, []);
+
+  const startClientCaptureSegment = useCallback(async () => {
+    setClientRecordingError("");
+    const c = clientMicRecorderRef.current;
+    if (c.recorder || !localStream) return false;
+    if (!window.MediaRecorder) {
+      setClientRecordingError("Recording is not supported in this browser.");
+      return false;
+    }
+    const jwt = getClientJwt();
+    if (!jwt) {
+      setClientRecordingError(
+        "Sign in with your Client ID and password on this page (or client portal) so recordings can upload."
+      );
+      return false;
+    }
+
+    const audioTrack = localStream.getAudioTracks?.()?.[0];
+    if (!audioTrack || !audioTrack.enabled) return false;
+
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      c.audioCtx = new AudioContext();
+      c.dest = c.audioCtx.createMediaStreamDestination();
+      try {
+        await c.audioCtx.resume();
+      } catch {
+        /* ignore */
+      }
+
+      ensureClientCaptureAudio("local", localStream);
+      const remotes = remoteStreamsRef.current;
+      for (const [peerId, data] of Object.entries(remotes)) {
+        ensureClientCaptureAudio(peerId, data?.stream);
+        await ensureClientCaptureVideoEl(peerId, data?.stream);
+      }
+      await ensureClientCaptureVideoEl("local", localStream);
+
+      c.canvas = document.createElement("canvas");
+      c.canvas.width = 1280;
+      c.canvas.height = 720;
+      c.ctx = c.canvas.getContext("2d");
+
+      const canvasStream = c.canvas.captureStream(30);
+      const mixed = new MediaStream();
+      canvasStream.getVideoTracks().forEach((t) => mixed.addTrack(t));
+      c.dest.stream.getAudioTracks().forEach((t) => mixed.addTrack(t));
+      c.mixedStream = mixed;
+
+      const mimeTypes = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm"
+      ];
+      const mimeType = mimeTypes.find((t) => MediaRecorder.isTypeSupported(t));
+      c.chunks = [];
+      c.segmentStartedAt = new Date().toISOString();
+      c.recorder = new MediaRecorder(mixed, mimeType ? { mimeType } : undefined);
+    } catch {
+      c.segmentStartedAt = null;
+      c.recorder = null;
+      cleanupClientMeetingCapture(c);
+      setClientRecordingError("Could not start meeting view recorder.");
+      return false;
+    }
+
+    const jwtForUpload = jwt;
+    c.recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) c.chunks.push(e.data);
+    };
+    c.recorder.onerror = () => {
+      setClientRecordingError("Recording failed.");
+      c.recorder = null;
+      c.chunks = [];
+      c.segmentStartedAt = null;
+      setClientMicCaptureActive(false);
+      try {
+        if (c.raf) cancelAnimationFrame(c.raf);
+      } catch {
+        /* ignore */
+      }
+      c.raf = null;
+      cleanupClientMeetingCapture(c);
+      try {
+        stopClientMicResolverRef.current?.();
+      } catch {
+        /* ignore */
+      }
+      stopClientMicResolverRef.current = null;
+    };
+    c.recorder.onstop = async () => {
+      const mime = c.recorder?.mimeType || "video/webm";
+      const blob = new Blob(c.chunks, { type: mime });
+      const segStart = c.segmentStartedAt;
+      c.chunks = [];
+      c.recorder = null;
+      c.segmentStartedAt = null;
+      try {
+        if (c.raf) cancelAnimationFrame(c.raf);
+      } catch {
+        /* ignore */
+      }
+      c.raf = null;
+      cleanupClientMeetingCapture(c);
+      setClientMicCaptureActive(false);
+      try {
+        stopClientMicResolverRef.current?.();
+      } catch {
+        /* ignore */
+      }
+      stopClientMicResolverRef.current = null;
+      if (!jwtForUpload) {
+        setClientRecordingError("Session expired. Sign in again to save recordings.");
+        return;
+      }
+      if (!blob.size) {
+        setClientRecordingError("Recording was empty. Stay unmuted a little longer.");
+        return;
+      }
+      try {
+        const form = new FormData();
+        form.append("recording", blob, `client-meeting-${roomId}-${Date.now()}.webm`);
+        if (segStart) form.append("segmentStartedAt", segStart);
+        const response = await fetch(`${API_BASE_URL}/api/meeting/${roomId}/client-recordings`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${jwtForUpload}` },
+          body: form
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          setClientRecordingError(data.message || "Could not save your recording.");
+        }
+      } catch {
+        setClientRecordingError("Could not save your recording.");
+      }
+    };
+
+    const draw = () => {
+      if (!c.ctx || !c.canvas) return;
+      const ctx = c.ctx;
+      const W = c.canvas.width;
+      const H = c.canvas.height;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, W, H);
+
+      const tiles = [];
+      if (localVideoRef.current) {
+        tiles.push({ label: `${userName || "You"}`, el: localVideoRef.current });
+      }
+      for (const [peerId, data] of Object.entries(remoteStreamsRef.current)) {
+        const el = c.videoEls.get(peerId);
+        if (el) tiles.push({ label: data?.userName || "Participant", el });
+      }
+
+      const n = Math.max(1, tiles.length);
+      const cols = Math.ceil(Math.sqrt(n));
+      const rows = Math.ceil(n / cols);
+      const pad = 8;
+      const tileW = Math.floor((W - pad * (cols + 1)) / cols);
+      const tileH = Math.floor((H - pad * (rows + 1)) / rows);
+
+      tiles.forEach((t, idx) => {
+        const r = Math.floor(idx / cols);
+        const col = idx % cols;
+        const x = pad + col * (tileW + pad);
+        const y = pad + r * (tileH + pad);
+        try {
+          ctx.drawImage(t.el, x, y, tileW, tileH);
+        } catch {
+          /* ignore draw until frames ready */
+        }
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(x, y + tileH - 26, tileW, 26);
+        ctx.fillStyle = "#fff";
+        ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+        ctx.fillText(t.label, x + 10, y + tileH - 8);
+      });
+
+      c.raf = requestAnimationFrame(draw);
+    };
+
+    draw();
+    try {
+      c.recorder.start(1000);
+      setClientMicCaptureActive(true);
+      return true;
+    } catch {
+      c.recorder = null;
+      c.segmentStartedAt = null;
+      setClientMicCaptureActive(false);
+      try {
+        if (c.raf) cancelAnimationFrame(c.raf);
+      } catch {
+        /* ignore */
+      }
+      c.raf = null;
+      cleanupClientMeetingCapture(c);
+      setClientRecordingError("Could not start recording.");
+      return false;
+    }
+  }, [localStream, roomId, getClientJwt, userName, stopClientMicRecordingAndUpload]);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
 
   useEffect(() => {
     fetchMeetingInfo();
@@ -113,10 +545,12 @@ export default function Meeting() {
       
       // Clear remote streams
       setRemoteStreams({});
+      setRemoteCameraOnByPeer({});
       
       socket.emit("leave-meeting", { roomId });
       socket.off("user-joined");
       socket.off("user-left");
+      socket.off("meeting-video-state");
       socket.off("private-call-request");
       socket.off("private-call-ended");
       socket.off("odds-update");
@@ -320,10 +754,12 @@ export default function Meeting() {
         // Compare as strings since MongoDB ObjectId comes as string in JSON
         if (meetingData.hostId === user.id || meetingData.hostId.toString() === user.id.toString()) {
           userIsHost = true;
+          isHostRef.current = true;
           setIsHost(true);
           setUserId(user.id);
           console.log('User is HOST');
         } else {
+          isHostRef.current = false;
           console.log('User is PARTICIPANT');
         }
       }
@@ -333,8 +769,10 @@ export default function Meeting() {
     
     if (user.name) {
       setUserName(user.name);
+      if (!user.id) isHostRef.current = false;
       initializeMedia(user.name, uid, userIsHost);
     } else if (storedClient) {
+      isHostRef.current = false;
       const clientData = JSON.parse(storedClient);
       setUserName(clientData.name);
       initializeMedia(clientData.name, null, false);
@@ -363,9 +801,13 @@ export default function Meeting() {
       const data = await response.json();
 
       if (response.ok && data.success) {
-        sessionStorage.setItem("clientAuth", JSON.stringify(data.client));
+        sessionStorage.setItem(
+          "clientAuth",
+          JSON.stringify({ ...data.client, token: data.token })
+        );
         setUserName(data.client.name);
         setShowNamePrompt(false);
+        isHostRef.current = false;
         initializeMedia(data.client.name, null, false);
       } else {
         setAuthError(data.message || "Invalid credentials");
@@ -403,16 +845,29 @@ export default function Meeting() {
     const awayTeam = score.event_away_team;
     const homeScore = String(score.event_home_final_result || "").trim();
     const awayScore = String(score.event_away_final_result || "").trim();
+    const infoRaw = String(score.event_status_info || "");
 
-    // Most reliable signal for live innings in this API:
-    // one side has a live score, the other is empty.
+    // First innings: one side has a score, the other is still empty.
     if (homeScore && !awayScore) return homeTeam || null;
     if (awayScore && !homeScore) return awayTeam || null;
 
-    // Fallback only when both/none are present.
-    const info = String(score.event_status_info || "").toLowerCase();
+    // Second innings: status almost always names the chasing side ("LSG need 2 runs").
+    const chaseBat = battingTeamFromChaseStatus(infoRaw, homeTeam, awayTeam);
+    if (chaseBat) return chaseBat;
+
+    // Full team names sometimes appear in status
+    const info = infoRaw.toLowerCase();
     if (homeTeam && info.includes(String(homeTeam).toLowerCase())) return homeTeam;
     if (awayTeam && info.includes(String(awayTeam).toLowerCase())) return awayTeam;
+
+    // Last resort: avoid always defaulting to home when both innings have totals
+    if (homeScore && awayScore) {
+      const g = teamAcronymFromFullName(homeTeam);
+      const a = teamAcronymFromFullName(awayTeam);
+      if (g && info.includes(g)) return homeTeam;
+      if (a && info.includes(a)) return awayTeam;
+    }
+
     return homeTeam || awayTeam || null;
   };
 
@@ -420,13 +875,37 @@ export default function Meeting() {
     if (!score) return "0/0";
     const homeTeam = score.event_home_team;
     const awayTeam = score.event_away_team;
-    const battingTeam = getBattingTeamName(score);
     const homeScore = String(score.event_home_final_result || "").trim();
     const awayScore = String(score.event_away_final_result || "").trim();
 
+    if (isMatchEnded(score)) {
+      const winner = winningTeamFromResultStatus(
+        score.event_status_info,
+        homeTeam,
+        awayTeam
+      );
+      if (winner === homeTeam) return homeScore || awayScore || "0/0";
+      if (winner === awayTeam) return awayScore || homeScore || "0/0";
+      if (homeScore && awayScore) return awayScore;
+      return awayScore || homeScore || "0/0";
+    }
+
+    const battingTeam = getBattingTeamName(score);
     if (battingTeam && battingTeam === homeTeam) return homeScore || awayScore || "0/0";
     if (battingTeam && battingTeam === awayTeam) return awayScore || homeScore || "0/0";
     return homeScore || awayScore || "0/0";
+  };
+
+  const getHeadlineTeamLabel = (score) => {
+    if (!score) return null;
+    if (isMatchEnded(score)) {
+      return winningTeamFromResultStatus(
+        score.event_status_info,
+        score.event_home_team,
+        score.event_away_team
+      );
+    }
+    return getBattingTeamName(score);
   };
 
   const fetchLiveScore = async (matchId) => {
@@ -477,6 +956,8 @@ export default function Meeting() {
       return;
     }
 
+    isHostRef.current = userIsHost;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 1280, height: 720 },
@@ -484,8 +965,16 @@ export default function Meeting() {
       });
       
       isInitialized.current = true; // Set after getting stream
-      
+
+      const mic = stream.getAudioTracks?.()?.[0];
+      if (mic) mic.enabled = false;
+      const cam = stream.getVideoTracks?.()?.[0];
+      if (cam) cam.enabled = false;
+      setIsMuted(true);
+      setIsVideoOff(true);
+
       setLocalStream(stream);
+
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
@@ -549,6 +1038,15 @@ export default function Meeting() {
           peerId: id,
           userId: uid 
         });
+
+        window.setTimeout(() => {
+          const v = stream.getVideoTracks?.()?.[0];
+          socket.emit("meeting-video-state", {
+            roomId,
+            peerId: id,
+            cameraOn: !!(v && v.enabled)
+          });
+        }, 500);
       });
 
       peer.on('error', (err) => {
@@ -611,6 +1109,12 @@ export default function Meeting() {
       // Remove old listeners before adding new ones
       socket.off("user-joined");
       socket.off("user-left");
+      socket.off("meeting-video-state");
+
+      socket.on("meeting-video-state", ({ peerId: pid, cameraOn }) => {
+        if (!pid || typeof cameraOn !== "boolean") return;
+        setRemoteCameraOnByPeer((prev) => ({ ...prev, [pid]: cameraOn }));
+      });
 
       // Listen for new users
       socket.on("user-joined", (data) => {
@@ -663,6 +1167,17 @@ export default function Meeting() {
         if (privateCallActive) {
           applyPrivateOutgoingAudioRouting(privateCallActive);
         }
+
+        window.setTimeout(() => {
+          const pid = peerInstance.current?.id;
+          if (!pid || !stream) return;
+          const v = stream.getVideoTracks?.()?.[0];
+          socket.emit("meeting-video-state", {
+            roomId,
+            peerId: pid,
+            cameraOn: !!(v && v.enabled)
+          });
+        }, 300);
       });
 
       socket.on("user-left", (peerId) => {
@@ -672,6 +1187,11 @@ export default function Meeting() {
           const updated = { ...prev };
           delete updated[peerId];
           return updated;
+        });
+        setRemoteCameraOnByPeer((prev) => {
+          const next = { ...prev };
+          delete next[peerId];
+          return next;
         });
         
         // End private call if active with this user
@@ -736,6 +1256,42 @@ export default function Meeting() {
     }
   };
 
+  const ensureClientCaptureVideoEl = async (key, stream) => {
+    if (!stream) return null;
+    const rec = clientMicRecorderRef.current;
+    if (rec.videoEls.has(key)) return rec.videoEls.get(key);
+
+    const el = document.createElement("video");
+    el.muted = true;
+    el.playsInline = true;
+    el.autoplay = true;
+    el.srcObject = stream;
+    try {
+      await el.play();
+    } catch {
+      /* ignore */
+    }
+    rec.videoEls.set(key, el);
+    return el;
+  };
+
+  const ensureClientCaptureAudio = (key, stream) => {
+    const rec = clientMicRecorderRef.current;
+    if (!rec.audioCtx || !rec.dest || !stream) return;
+    if (rec.audioSources.has(key)) return;
+
+    const hasAudio = stream.getAudioTracks && stream.getAudioTracks().length > 0;
+    if (!hasAudio) return;
+
+    try {
+      const source = rec.audioCtx.createMediaStreamSource(stream);
+      source.connect(rec.dest);
+      rec.audioSources.set(key, source);
+    } catch {
+      /* ignore */
+    }
+  };
+
   useEffect(() => {
     if (!isRecording) return;
 
@@ -769,6 +1325,35 @@ export default function Meeting() {
       }
     }
   }, [isRecording, remoteStreams, localStream]);
+
+  useEffect(() => {
+    if (!clientMicCaptureActive || isHost) return;
+    const c = clientMicRecorderRef.current;
+    if (!c.audioCtx || !c.dest) return;
+
+    ensureClientCaptureAudio("local", localStream);
+    void ensureClientCaptureVideoEl("local", localStream);
+    Object.entries(remoteStreams).forEach(([peerId, data]) => {
+      ensureClientCaptureAudio(peerId, data?.stream);
+      void ensureClientCaptureVideoEl(peerId, data?.stream);
+    });
+
+    for (const peerId of Array.from(c.videoEls.keys())) {
+      if (peerId === "local") continue;
+      if (!remoteStreams[peerId]) c.videoEls.delete(peerId);
+    }
+    for (const peerId of Array.from(c.audioSources.keys())) {
+      if (peerId === "local") continue;
+      if (!remoteStreams[peerId]) {
+        try {
+          c.audioSources.get(peerId)?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        c.audioSources.delete(peerId);
+      }
+    }
+  }, [clientMicCaptureActive, isHost, remoteStreams, localStream]);
 
   const startRecording = async () => {
     setRecordingError("");
@@ -1049,17 +1634,47 @@ export default function Meeting() {
     }
   };
 
-  const toggleMute = () => {
-    if (localStream) {
-      localStream.getAudioTracks()[0].enabled = isMuted;
-      setIsMuted(!isMuted);
+  const toggleMute = async () => {
+    if (!localStream) return;
+    const track = localStream.getAudioTracks()[0];
+    if (!track) return;
+    const willBeUnmuted = isMuted;
+    const jwt = getClientJwt();
+    const isClientGuest = !isHostRef.current && !!jwt;
+
+    if (isClientGuest && !willBeUnmuted) {
+      await stopClientMicRecordingAndUpload();
     }
+
+    if (isClientGuest && willBeUnmuted) {
+      track.enabled = true;
+      setIsMuted(false);
+      const ok = await startClientCaptureSegment();
+      if (!ok) {
+        track.enabled = false;
+        setIsMuted(true);
+      }
+      return;
+    }
+
+    track.enabled = willBeUnmuted;
+    setIsMuted(!isMuted);
   };
 
   const toggleVideo = () => {
     if (localStream) {
-      localStream.getVideoTracks()[0].enabled = isVideoOff;
-      setIsVideoOff(!isVideoOff);
+      const track = localStream.getVideoTracks()[0];
+      if (track) track.enabled = isVideoOff;
+      const nextOff = !isVideoOff;
+      setIsVideoOff(nextOff);
+      const pid = peerInstance.current?.id;
+      if (pid) {
+        socket.emit("meeting-video-state", {
+          roomId,
+          peerId: pid,
+          cameraOn: !nextOff
+        });
+      }
     }
   };
 
@@ -1070,7 +1685,8 @@ export default function Meeting() {
     setTimeout(() => setShowCopied(false), 2000);
   };
 
-  const leaveMeeting = () => {
+  const leaveMeeting = async () => {
+    await stopClientMicRecordingAndUpload();
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
@@ -1078,13 +1694,18 @@ export default function Meeting() {
       peerInstance.current.destroy();
     }
     socket.emit("leave-meeting", { roomId });
-    sessionStorage.removeItem("clientAuth");
-    const token = localStorage.getItem("token");
-    if (token) {
+
+    if (isHostRef.current) {
+      sessionStorage.removeItem("clientAuth");
       navigate("/");
-    } else {
-      navigate("/");
+      return;
     }
+    if (localStorage.getItem("clientToken")) {
+      navigate("/client?tab=meetings");
+      return;
+    }
+    sessionStorage.removeItem("clientAuth");
+    navigate("/");
   };
 
   if (showNamePrompt) {
@@ -1194,7 +1815,7 @@ export default function Meeting() {
       display: "flex",
       flexDirection: "column"
     }}>
-      <div style={{
+      {/* <div style={{
         position: "fixed",
         top: 70,
         left: 20,
@@ -1218,7 +1839,7 @@ export default function Meeting() {
             {webrtcIssue}
           </span>
         )}
-      </div>
+      </div> */}
       {(audioPlaybackBlocked || !audioUnlocked) && (
         <div style={{
           position: "fixed",
@@ -1283,7 +1904,6 @@ export default function Meeting() {
           <h2 style={{ margin: 0, fontSize: 20 }}>{meetingInfo?.title || "Meeting Room"}</h2>
           <p style={{ margin: "5px 0 0 0", fontSize: 12, opacity: 0.8 }}>
             {userName} {isHost && '(Host)'} • {Object.keys(remoteStreams).length + 1} participant{Object.keys(remoteStreams).length !== 0 ? 's' : ''}
-            {isRecording && <span style={{ marginLeft: 10, color: "#ffdddd", fontWeight: 700 }}>● Recording</span>}
           </p>
         </div>
         {isHost && (
@@ -1325,6 +1945,42 @@ export default function Meeting() {
         )}
       </div>
 
+      {!isHost && clientMicCaptureActive && (
+        <div
+          style={{
+            background: "linear-gradient(90deg, #922b21 0%, #e74c3c 50%, #922b21 100%)",
+            color: "white",
+            textAlign: "center",
+            padding: "11px 20px",
+            fontWeight: 700,
+            fontSize: 14,
+            letterSpacing: 0.4,
+            boxShadow: "inset 0 -2px 0 rgba(0,0,0,0.15)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            flexWrap: "wrap"
+          }}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              background: "#fff",
+              boxShadow: "0 0 10px #fff",
+              flexShrink: 0
+            }}
+            aria-hidden
+          />
+          <span>
+            Recording — this meeting&apos;s video tiles and your voice are being saved while unmuted.
+            Mute to finish and upload this clip.
+          </span>
+        </div>
+      )}
+
       {recordingError && (
         <div style={{
           margin: "12px 30px 0 30px",
@@ -1336,6 +1992,20 @@ export default function Meeting() {
           fontSize: 13
         }}>
           {recordingError}
+        </div>
+      )}
+
+      {clientRecordingError && (
+        <div style={{
+          margin: "12px 30px 0 30px",
+          padding: 12,
+          background: "rgba(231,76,60,0.25)",
+          border: "1px solid rgba(231,76,60,0.5)",
+          borderRadius: 10,
+          color: "white",
+          fontSize: 13
+        }}>
+          {clientRecordingError}
         </div>
       )}
 
@@ -1381,10 +2051,9 @@ export default function Meeting() {
                     {matchData.matchName}
                   </div>
                   <div style={{ fontSize: 11, opacity: 0.85 }}>
-                    Batting: <span style={{ fontWeight: 700, fontSize: 13 }}>
-                      {(() => {
-                        return getBattingTeamName(liveScore) || "—";
-                      })()}
+                    {isMatchEnded(liveScore) ? "Winner" : "Batting"}:{" "}
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>
+                      {getHeadlineTeamLabel(liveScore) || "—"}
                     </span>
                   </div>
                 </div>
@@ -1432,7 +2101,7 @@ export default function Meeting() {
                   );
                 }
                 if (liveScore.comments) {
-                  const allBalls = Object.values(liveScore.comments).flat();
+                  const allBalls = getSortedCommentBalls(liveScore.comments);
                   if (allBalls.length > 0) {
                     const latestBall = allBalls[allBalls.length - 1];
                     const runs = latestBall.runs;
@@ -1535,7 +2204,7 @@ export default function Meeting() {
                     borderRadius: 4,
                     display: "inline-block"
                   }}>
-                    {liveScore.event_status_info}
+                    {formatCricketStatusText(liveScore.event_status_info)}
                   </div>
                 )}
               </div>
@@ -1576,7 +2245,7 @@ export default function Meeting() {
                     
                     // Extract bowler and one batsman from comments
                     if (liveScore.comments) {
-                      const allBalls = Object.values(liveScore.comments).flat();
+                      const allBalls = getSortedCommentBalls(liveScore.comments);
                       if (allBalls.length > 0) {
                         const latestBall = allBalls[allBalls.length - 1];
                         if (latestBall.post && latestBall.post.includes(' to ')) {
@@ -1682,22 +2351,23 @@ export default function Meeting() {
                         </div>
                         <div style={{ fontSize: 11, fontWeight: 600, opacity: 0.9 }}>
                           {(() => {
-                            const allBalls = Object.values(liveScore.comments).flat();
+                            const allBalls = getSortedCommentBalls(liveScore.comments);
                             if (allBalls.length > 0) {
-                              const latestBall = allBalls[allBalls.length - 1];
-                              return `Over ${latestBall.overs || '0'}`;
+                              const cur = getBallsInCurrentOver(allBalls);
+                              const latestBall = cur.length ? cur[cur.length - 1] : allBalls[allBalls.length - 1];
+                              return `Over ${latestBall.overs ?? "0"}`;
                             }
-                            return 'Over 0';
+                            return "Over 0";
                           })()}
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         {(() => {
-                          const allBalls = Object.values(liveScore.comments).flat();
-                          const currentOverBalls = allBalls.slice(-6);
+                          const allBalls = getSortedCommentBalls(liveScore.comments);
+                          const currentOverBalls = getBallsInCurrentOver(allBalls);
                           
                           return currentOverBalls.map((ball, idx) => (
-                            <div key={idx} style={{
+                            <div key={`${String(ball.overs)}-${idx}-${ball.runs}`} style={{
                               minWidth: 32,
                               height: 32,
                               display: "flex",
@@ -1919,78 +2589,74 @@ export default function Meeting() {
               autoPlay
               muted
               playsInline
-              style={{ 
-                width: "100%", 
-                height: "100%", 
+              style={{
+                width: "100%",
+                height: "100%",
                 objectFit: "cover",
-                transform: "scaleX(-1)"
+                transform: "scaleX(-1)",
+                opacity: isVideoOff ? 0 : 1
               }}
             />
-            {isVideoOff && (
-              <div style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                background: "#1a1a1a",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center"
-              }}>
-                <div style={{ fontSize: 80, marginBottom: 10 }}>👤</div>
-                <div style={{ fontSize: 18, color: "white" }}>{userName}</div>
-              </div>
-            )}
+            {isVideoOff && <CameraOffPlaceholder userName={userName} />}
             {isSpeaking && (
-              <div style={{
-                position: "absolute",
-                top: 15,
-                right: 15,
-                background: "#27ae60",
-                padding: "6px 12px",
-                borderRadius: 20,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                animation: "pulse 1s infinite"
-              }}>
+              <div
+                style={{
+                  position: "absolute",
+                  top: 15,
+                  right: 15,
+                  background: "#27ae60",
+                  padding: "6px 12px",
+                  borderRadius: 20,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  animation: "pulse 1s infinite",
+                  zIndex: 3
+                }}
+              >
                 <span style={{ fontSize: 16 }}>🎤</span>
                 <span style={{ fontSize: 12, color: "white", fontWeight: 500 }}>Speaking</span>
               </div>
             )}
             {privateCallActive && (
-              <div style={{
-                position: "absolute",
-                top: 15,
-                left: 15,
-                background: "#e74c3c",
-                padding: "6px 12px",
-                borderRadius: 20,
-                display: "flex",
-                alignItems: "center",
-                gap: 6
-              }}>
+              <div
+                style={{
+                  position: "absolute",
+                  top: 15,
+                  left: 15,
+                  background: "#e74c3c",
+                  padding: "6px 12px",
+                  borderRadius: 20,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  zIndex: 3
+                }}
+              >
                 <span style={{ fontSize: 16 }}>🔒</span>
                 <span style={{ fontSize: 12, color: "white", fontWeight: 500 }}>Private Mode</span>
               </div>
             )}
-            <div style={{ 
-              position: "absolute", 
-              bottom: 15, 
-              left: 15, 
-              background: "rgba(0,0,0,0.7)", 
-              padding: "8px 15px", 
-              borderRadius: 8,
-              color: "white",
-              fontSize: 14,
-              fontWeight: 500,
-              display: "flex",
-              alignItems: "center",
-              gap: 8
-            }}>
-              <span>{userName} (You) {isHost && '👑'}</span>
+            <div
+              style={{
+                position: "absolute",
+                bottom: 15,
+                left: 15,
+                background: "rgba(0,0,0,0.7)",
+                padding: "8px 15px",
+                borderRadius: 8,
+                color: "white",
+                fontSize: 14,
+                fontWeight: 500,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                zIndex: 3
+              }}
+            >
+              <span>
+                {userName} (You) {isHost && "👑"}
+              </span>
               {isMuted && <span>🔇</span>}
             </div>
           </div>
@@ -2006,6 +2672,7 @@ export default function Meeting() {
               isPrivateCallActive={privateCallActive === peerId}
               onStartPrivateCall={() => startPrivateCall(peerId, data.userName)}
               onEndPrivateCall={endPrivateCall}
+              signaledCameraOn={remoteCameraOnByPeer[peerId]}
             />
           ))}
         </div>
@@ -2021,32 +2688,6 @@ export default function Meeting() {
         gap: 20,
         zIndex: 1000
       }}>
-        {isHost && (
-          <button
-            onClick={isRecording ? stopRecording : startRecording}
-            style={{
-              width: 60,
-              height: 60,
-              background: isRecording ? "#e74c3c" : "rgba(255,255,255,0.2)",
-              border: "2px solid rgba(255,255,255,0.3)",
-              color: "white",
-              borderRadius: "50%",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 28,
-              lineHeight: 1,
-              transition: "all 0.3s",
-              backdropFilter: "blur(10px)",
-              boxShadow: "0 4px 15px rgba(0,0,0,0.2)"
-            }}
-            title={isRecording ? "Stop Recording" : "Start Recording"}
-          >
-            {isRecording ? "⏹️" : "⏺️"}
-          </button>
-        )}
-
         <button 
           onClick={toggleMute} 
           style={{ 
@@ -2272,26 +2913,215 @@ function RemoteAudio({ stream, audioUnlocked, onBlocked }) {
   return <audio ref={ref} autoPlay playsInline />;
 }
 
-function RemoteVideo({ stream, userName, isHost, peerId, showHostControls, isPrivateCallActive, onStartPrivateCall, onEndPrivateCall }) {
+function CameraOffPlaceholder({ userName }) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 2,
+        background: "linear-gradient(180deg, #2c2f3d 0%, #1a1d28 100%)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center"
+      }}
+    >
+      <div
+        style={{
+          width: 88,
+          height: 88,
+          borderRadius: "50%",
+          background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 44,
+          boxShadow: "0 8px 24px rgba(102, 126, 234, 0.35)",
+          marginBottom: 14
+        }}
+      >
+        👤
+      </div>
+      <div style={{ fontSize: 17, color: "white", fontWeight: 600 }}>{userName || "Guest"}</div>
+      <div style={{ fontSize: 13, color: "#8b92a8", marginTop: 6 }}>Camera off</div>
+    </div>
+  );
+}
+
+/** Remote tracks often stay enabled while sending black frames; sample luma to detect that. */
+function sampleVideoFrameLuma(videoEl) {
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  if (!vw || !vh) return null;
+  const w = 48;
+  const h = 48;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  try {
+    ctx.drawImage(videoEl, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 16) {
+      sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      n++;
+    }
+    return n ? sum / n : null;
+  } catch {
+    return null;
+  }
+}
+
+function RemoteVideo({
+  stream,
+  userName,
+  isHost,
+  peerId,
+  showHostControls,
+  isPrivateCallActive,
+  onStartPrivateCall,
+  onEndPrivateCall,
+  signaledCameraOn
+}) {
   const ref = useRef();
+  const signalRef = useRef(signaledCameraOn);
+  signalRef.current = signaledCameraOn;
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  /** Track-level block: ended, disabled, muted, or no decoded dimensions yet. */
+  const [trackBlocksContent, setTrackBlocksContent] = useState(true);
+  /** When track "live" but frames are black (common when sender camera off), stay false until luma rises. */
+  const [seesBrightPixels, setSeesBrightPixels] = useState(false);
+  const darkStreakRef = useRef(0);
   const audioContextRef = useRef(null);
 
   useEffect(() => {
-    if (ref.current && stream) {
-      ref.current.srcObject = stream;
-      
-      // Set up audio detection for remote stream
-      setupRemoteAudioDetection(stream);
+    if (!stream) {
+      setTrackBlocksContent(true);
+      setSeesBrightPixels(false);
+      darkStreakRef.current = 0;
+      return undefined;
     }
 
+    const video = ref.current;
+    if (!video) {
+      setTrackBlocksContent(true);
+      setSeesBrightPixels(false);
+      darkStreakRef.current = 0;
+      return undefined;
+    }
+
+    video.srcObject = stream;
+    const vt = stream.getVideoTracks()[0];
+    darkStreakRef.current = 0;
+    setSeesBrightPixels(false);
+
+    const syncTrackBlocks = () => {
+      if (!vt || vt.readyState === "ended") {
+        setTrackBlocksContent(true);
+        setSeesBrightPixels(false);
+        darkStreakRef.current = 0;
+        return;
+      }
+      if (!vt.enabled || vt.muted) {
+        setTrackBlocksContent(true);
+        setSeesBrightPixels(false);
+        darkStreakRef.current = 0;
+        return;
+      }
+      const el = ref.current;
+      if (
+        el &&
+        el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        el.videoWidth === 0 &&
+        el.videoHeight === 0
+      ) {
+        setTrackBlocksContent(true);
+        return;
+      }
+      setTrackBlocksContent(false);
+    };
+
+    const tick = () => {
+      syncTrackBlocks();
+      if (signalRef.current !== undefined) return;
+
+      const el = ref.current;
+      if (!el || !vt || vt.readyState === "ended" || !vt.enabled || vt.muted) return;
+      if (el.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !el.videoWidth) return;
+
+      const luma = sampleVideoFrameLuma(el);
+      if (luma == null) {
+        setSeesBrightPixels(true);
+        darkStreakRef.current = 0;
+        return;
+      }
+      const BLACK = 4;
+      const BRIGHT = 8;
+      const BLACK_TICKS = 5;
+      if (luma >= BRIGHT) {
+        darkStreakRef.current = 0;
+        setSeesBrightPixels(true);
+      } else if (luma <= BLACK) {
+        darkStreakRef.current += 1;
+        if (darkStreakRef.current >= BLACK_TICKS) {
+          setSeesBrightPixels(false);
+        }
+      } else {
+        darkStreakRef.current = 0;
+        setSeesBrightPixels(true);
+      }
+    };
+
+    tick();
+
+    const onVideoEvent = () => tick();
+    video.addEventListener("loadedmetadata", onVideoEvent);
+    video.addEventListener("loadeddata", onVideoEvent);
+    video.addEventListener("playing", onVideoEvent);
+    video.addEventListener("resize", onVideoEvent);
+
+    if (vt) {
+      vt.addEventListener("mute", tick);
+      vt.addEventListener("unmute", tick);
+      vt.addEventListener("ended", tick);
+    }
+
+    const poll = window.setInterval(tick, 450);
+
+    setupRemoteAudioDetection(stream);
+
     return () => {
+      window.clearInterval(poll);
+      video.removeEventListener("loadedmetadata", onVideoEvent);
+      video.removeEventListener("loadeddata", onVideoEvent);
+      video.removeEventListener("playing", onVideoEvent);
+      video.removeEventListener("resize", onVideoEvent);
+      if (vt) {
+        vt.removeEventListener("mute", tick);
+        vt.removeEventListener("unmute", tick);
+        vt.removeEventListener("ended", tick);
+      }
+      video.srcObject = null;
       if (audioContextRef.current) {
-        audioContextRef.current.close();
+        try {
+          audioContextRef.current.close();
+        } catch {
+          /* ignore */
+        }
+        audioContextRef.current = null;
       }
     };
   }, [stream]);
+
+  const showPlaceholder =
+    signaledCameraOn !== undefined
+      ? !signaledCameraOn
+      : trackBlocksContent || !seesBrightPixels;
 
   const setupRemoteAudioDetection = (mediaStream) => {
     try {
@@ -2341,46 +3171,54 @@ function RemoteVideo({ stream, userName, isHost, peerId, showHostControls, isPri
         ref={ref}
         autoPlay
         playsInline
-        style={{ 
-          width: "100%", 
-          height: "100%", 
-          objectFit: "cover"
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          opacity: showPlaceholder ? 0 : 1
         }}
       />
+      {showPlaceholder && <CameraOffPlaceholder userName={userName} />}
       {isSpeaking && (
-        <div style={{
-          position: "absolute",
-          top: 15,
-          right: 15,
-          background: "#27ae60",
-          padding: "6px 12px",
-          borderRadius: 20,
-          display: "flex",
-          alignItems: "center",
-          gap: 6
-        }}>
+        <div
+          style={{
+            position: "absolute",
+            top: 15,
+            right: 15,
+            background: "#27ae60",
+            padding: "6px 12px",
+            borderRadius: 20,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            zIndex: 3
+          }}
+        >
           <span style={{ fontSize: 16 }}>🎤</span>
           <span style={{ fontSize: 12, color: "white", fontWeight: 500 }}>Speaking</span>
         </div>
       )}
       {isPrivateCallActive && (
-        <div style={{
-          position: "absolute",
-          top: 15,
-          left: 15,
-          background: "#e74c3c",
-          padding: "6px 12px",
-          borderRadius: 20,
-          display: "flex",
-          alignItems: "center",
-          gap: 6
-        }}>
+        <div
+          style={{
+            position: "absolute",
+            top: 15,
+            left: 15,
+            background: "#e74c3c",
+            padding: "6px 12px",
+            borderRadius: 20,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            zIndex: 3
+          }}
+        >
           <span style={{ fontSize: 16 }}>🔒</span>
           <span style={{ fontSize: 12, color: "white", fontWeight: 500 }}>Private</span>
         </div>
       )}
       {showHostControls && !isHost && (
-        <div style={{ position: "absolute", top: 15, left: 15 }}>
+        <div style={{ position: "absolute", top: 15, left: 15, zIndex: 3 }}>
           <button
             onClick={() => setShowMenu(!showMenu)}
             style={{
@@ -2462,20 +3300,23 @@ function RemoteVideo({ stream, userName, isHost, peerId, showHostControls, isPri
           )}
         </div>
       )}
-      <div style={{ 
-        position: "absolute", 
-        bottom: 15, 
-        left: 15, 
-        background: "rgba(0,0,0,0.7)", 
-        padding: "8px 15px", 
-        borderRadius: 8,
-        color: "white",
-        fontSize: 14,
-        fontWeight: 500,
-        display: "flex",
-        alignItems: "center",
-        gap: 8
-      }}>
+      <div
+        style={{
+          position: "absolute",
+          bottom: 15,
+          left: 15,
+          background: "rgba(0,0,0,0.7)",
+          padding: "8px 15px",
+          borderRadius: 8,
+          color: "white",
+          fontSize: 14,
+          fontWeight: 500,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          zIndex: 3
+        }}
+      >
         <span>{userName}</span>
         {isHost && <span>👑</span>}
       </div>
